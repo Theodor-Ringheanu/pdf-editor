@@ -18,6 +18,7 @@ import threading
 from typing import List, Tuple, Optional
 import math
 import glob
+import time
 
 class VisualPDFSplitterApp:
     # UI Constants
@@ -66,6 +67,7 @@ class VisualPDFSplitterApp:
         self.drag_ghost = None  # Ghost image during drag
         self.original_order = []  # Backup of original order
         self.original_rotations = {}  # Backup of original rotations
+        self.page_rotations = {}  # Current page rotations (page_number: angle)
         self.has_edited = False  # Flag to track if pages have been edited (reordered/deleted)
         
         # New: Crop functionality
@@ -78,6 +80,11 @@ class VisualPDFSplitterApp:
         self.crop_canvas_items = {}  # Canvas items for crop rectangles
         self.crop_overlay = None  # Current crop overlay rectangle
         self.crop_overlay_canvas = None  # Canvas for crop overlay
+        
+        # Merge functionality
+        self.is_merged_pdf = False  # Flag to track if current PDF is a merged result
+        self.merged_temp_path = None  # Path to temporary merged PDF file
+        self.merged_first_pdf_name = None  # Name of the first PDF used in merge for default naming
         
         # Colors for selection states
         self.colors = {
@@ -124,6 +131,9 @@ class VisualPDFSplitterApp:
         file_menu.add_command(label="Open PDF...", command=self.load_pdf, accelerator="Ctrl+O")
         file_menu.add_command(label="Open Folder...", command=self.load_pdf_folder, accelerator="Ctrl+Shift+O")
         file_menu.add_separator()
+        file_menu.add_command(label="Merge Two PDFs...", command=self.merge_two_pdfs, accelerator="Ctrl+M")
+        file_menu.add_command(label="Merge with External PDF...", command=self.merge_add_external, accelerator="Ctrl+Shift+M")
+        file_menu.add_separator()
         file_menu.add_command(label="Clear Selection", command=self.clear_selection, accelerator="Ctrl+C")
         file_menu.add_command(label="Reset Edit Session", command=self.reset_edit_session, accelerator="Ctrl+R")
         file_menu.add_separator()
@@ -162,6 +172,8 @@ class VisualPDFSplitterApp:
         # Keyboard shortcuts
         self.root.bind('<Control-o>', lambda e: self.load_pdf())
         self.root.bind('<Control-Shift-O>', lambda e: self.load_pdf_folder())
+        self.root.bind('<Control-m>', lambda e: self.merge_two_pdfs())
+        self.root.bind('<Control-Shift-M>', lambda e: self.merge_add_external())
         self.root.bind('<Control-c>', lambda e: self.clear_selection())
         self.root.bind('<Control-r>', lambda e: self.reset_edit_session())
         self.root.bind('<Control-q>', lambda e: self.root.quit())
@@ -179,14 +191,38 @@ class VisualPDFSplitterApp:
         self.root.bind('<Control-e>', lambda e: self.toggle_edit_mode())
         self.root.bind('<Control-s>', lambda e: self.save_edited_pdf())
         
-        # New navigation shortcuts
-        self.root.bind('<Up>', lambda e: self.previous_pdf())
-        self.root.bind('<Down>', lambda e: self.next_pdf())
-        self.root.bind('<Left>', lambda e: self.scroll_pages(-1))
-        self.root.bind('<Right>', lambda e: self.scroll_pages(1))
+        # Arrow key navigation: Left/Right for PDF files, Up/Down for page scrolling
+        self.root.bind('<Left>', lambda e: self.handle_left_arrow(e))
+        self.root.bind('<Right>', lambda e: self.handle_right_arrow(e))
+        self.root.bind('<Up>', lambda e: self.handle_up_arrow(e))
+        self.root.bind('<Down>', lambda e: self.handle_down_arrow(e))
         
-        # Focus management for keyboard events
+        # Focus management for keyboard events - ensure root can receive key events
         self.root.focus_set()
+        self.root.focus_force()
+        
+        # Make root focusable and ensure it can receive keyboard events
+        self.root.bind('<Button-1>', lambda e: self.root.focus_set())
+        
+    def handle_left_arrow(self, event):
+        """Handle left arrow key - navigate to previous PDF"""
+        self.previous_pdf()
+        return "break"  # Prevent event propagation
+        
+    def handle_right_arrow(self, event):
+        """Handle right arrow key - navigate to next PDF"""
+        self.next_pdf()
+        return "break"  # Prevent event propagation
+        
+    def handle_up_arrow(self, event):
+        """Handle up arrow key - scroll up in current PDF"""
+        self.scroll_pages(-1)
+        return "break"  # Prevent event propagation
+        
+    def handle_down_arrow(self, event):
+        """Handle down arrow key - scroll down in current PDF"""
+        self.scroll_pages(1)
+        return "break"  # Prevent event propagation
         
     def create_widgets(self):
         """Create main application widgets"""
@@ -256,6 +292,21 @@ class VisualPDFSplitterApp:
         
         ttk.Button(file_section, text="📂 Open Folder", 
                   command=self.load_pdf_folder, style=self.STYLE_ACCENT_BUTTON).pack(side=tk.LEFT)
+        
+        # === MERGE SECTION ===
+        merge_section = ttk.Frame(main_controls_frame)
+        merge_section.pack(side=tk.LEFT, padx=(0, 20), pady=5)
+        
+        ttk.Label(merge_section, text="Merge:", style=self.STYLE_SUBTITLE).pack(anchor=tk.W)
+        
+        merge_buttons = ttk.Frame(merge_section)
+        merge_buttons.pack()
+        
+        ttk.Button(merge_buttons, text="🔗 Two PDFs", command=self.merge_two_pdfs).pack(side=tk.LEFT, padx=(0, 2))
+        ttk.Button(merge_buttons, text="➕ Add PDF", command=self.merge_add_external).pack(side=tk.LEFT, padx=(0, 2))
+        
+        # Save Merged PDF button (initially hidden)
+        self.save_merged_btn = ttk.Button(merge_buttons, text="💾 Save Merged", command=self.save_merged_pdf, style='Accent.TButton')
         
         # === NAVIGATION SECTION ===
         nav_section = ttk.Frame(main_controls_frame)
@@ -494,6 +545,9 @@ class VisualPDFSplitterApp:
         self.canvas.bind('<Home>', lambda e: self.canvas.yview_moveto(0))
         self.canvas.bind('<End>', lambda e: self.canvas.yview_moveto(1))
         
+        # Ensure canvas clicks don't steal focus from arrow key handling
+        self.canvas.bind('<Button-1>', lambda e: self.root.focus_set())
+        
         # Make canvas focusable for keyboard events
         self.canvas.focus_set()
 
@@ -529,9 +583,10 @@ class VisualPDFSplitterApp:
             self.status_var.set("Page selection mode enabled")
             self.thumbnails_frame.config(bg='white')
             
-        # Update display to reflect mode change
+        # Update display to reflect mode change without rebuilding thumbnails
         if self.page_thumbnails:
-            self.display_thumbnails()
+            # Just refresh the display layout, don't rebuild thumbnails
+            self.display_thumbnails(force_rebuild=True)
     
     def show_edit_instructions(self):
         """Show brief instructions for edit mode"""
@@ -654,7 +709,7 @@ class VisualPDFSplitterApp:
             self.update_drag_ghost(event)
             
         except Exception as e:
-            print(f"Error creating drag ghost: {e}")
+            pass
     
     def update_drag_ghost(self, event):
         """Update ghost position"""
@@ -704,7 +759,7 @@ class VisualPDFSplitterApp:
             return None
             
         except Exception as e:
-            print(f"Error finding drop target: {e}")
+            pass
             return None
     
     def show_drop_indicator(self, target_index):
@@ -757,11 +812,11 @@ class VisualPDFSplitterApp:
             source_widget = self.page_widgets[self.drag_data['source_index']]
             if source_widget:
                 if not self.is_page_selected(self.drag_data['source_page_num'] + 1):
-                    self.set_page_color(source_widget, self.colors['reorder_mode'] if self.reorder_mode else self.colors['normal'])
+                    self.set_page_color(source_widget, self.colors['edit_mode'] if self.edit_mode else self.colors['normal'])
                 source_widget['frame'].config(relief=tk.RAISED, borderwidth=2)
             
         except Exception as e:
-            print(f"Error ending drag: {e}")
+            pass
         finally:
             # Clear drag data
             self.drag_data = None
@@ -796,40 +851,50 @@ class VisualPDFSplitterApp:
             self.status_var.set(f"Moved page {page_num + 1} to position {target_index + 1}")
             
         except Exception as e:
-            print(f"Error reordering pages: {e}")
+            pass
             messagebox.showerror("Reorder Error", f"Failed to reorder pages: {str(e)}")
     
     def regenerate_ordered_thumbnails(self):
-        """Regenerate thumbnails in the new order"""
+        """Regenerate thumbnails in the new order without complete rebuild"""
         if not self.pdf_document or not self.page_order:
             return
             
         try:
+            # Store original thumbnails to avoid losing them during reordering
+            original_thumbnails = self.page_thumbnails.copy()
+            original_widgets = self.page_widgets.copy()
+            
             # Create new ordered lists
             ordered_thumbnails = []
             ordered_widgets = []
             
-            # Reorder based on page_order
+            # Reorder based on page_order, preserving existing thumbnail objects
             for page_index in self.page_order:
-                if page_index < len(self.page_thumbnails):
-                    ordered_thumbnails.append(self.page_thumbnails[page_index])
+                if page_index < len(original_thumbnails):
+                    ordered_thumbnails.append(original_thumbnails[page_index])
                 else:
                     ordered_thumbnails.append(None)
                     
-                if page_index < len(self.page_widgets):
-                    ordered_widgets.append(self.page_widgets[page_index])
+                if page_index < len(original_widgets):
+                    ordered_widgets.append(original_widgets[page_index])
                 else:
                     ordered_widgets.append(None)
             
-            # Update the lists
+            # Update the lists atomically to prevent race conditions
             self.page_thumbnails = ordered_thumbnails
             self.page_widgets = ordered_widgets
             
-            # Redisplay
-            self.display_thumbnails()
+            # Only redisplay if we have valid thumbnails to avoid flicker
+            if any(thumb is not None for thumb in self.page_thumbnails):
+                self.display_thumbnails()
             
         except Exception as e:
-            print(f"Error regenerating ordered thumbnails: {e}")
+            pass
+            # Fallback: restore original state if reordering fails
+            if 'original_thumbnails' in locals():
+                self.page_thumbnails = original_thumbnails
+            if 'original_widgets' in locals():
+                self.page_widgets = original_widgets
     
     def reset_edit_session(self):
         """Reset pages to original order, restore deleted pages, and reset rotations"""
@@ -933,7 +998,7 @@ class VisualPDFSplitterApp:
                         
                         # Apply rotation if set for this page (1-based)
                         page_number_1based = page_index + 1
-                        if hasattr(self, 'page_rotations') and page_number_1based in self.page_rotations:
+                        if page_number_1based in self.page_rotations:
                             rotation_angle = self.page_rotations[page_number_1based]
                             if rotation_angle == 90:
                                 page = page.rotate(90)
@@ -1064,6 +1129,11 @@ class VisualPDFSplitterApp:
             # Reset rotations when loading new PDF
             self.page_rotations = {}
             
+            # Reset merge state
+            self.is_merged_pdf = False
+            self.merged_first_pdf_name = None
+            self.update_merge_ui()
+            
             # Initialize edit session tracking
             self.initialize_edit_session()
             
@@ -1078,6 +1148,9 @@ class VisualPDFSplitterApp:
             # Generate thumbnails in background thread
             self.status_var.set("Generating thumbnails...")
             threading.Thread(target=self.generate_thumbnails, daemon=True).start()
+            
+            # Ensure root window has focus for keyboard events
+            self.root.focus_set()
             
         except Exception as e:
             messagebox.showerror("Error", f"Failed to load PDF '{os.path.basename(current_pdf_path)}':\n{str(e)}")
@@ -1118,12 +1191,12 @@ class VisualPDFSplitterApp:
             self.load_current_pdf()
             
     def scroll_pages(self, direction):
-        """Scroll through pages of current PDF (left/right arrow keys)"""
+        """Scroll through pages of current PDF (up/down arrow keys)"""
         if direction < 0:
-            # Scroll up/left
+            # Scroll up (up arrow key)
             self.canvas.yview_scroll(-5, "units")
         else:
-            # Scroll down/right
+            # Scroll down (down arrow key)
             self.canvas.yview_scroll(5, "units")
     
     def on_mousewheel(self, event):
@@ -1221,6 +1294,11 @@ class VisualPDFSplitterApp:
             # Reset rotations when loading new PDF
             self.page_rotations = {}
             
+            # Reset merge state
+            self.is_merged_pdf = False
+            self.merged_first_pdf_name = None
+            self.update_merge_ui()
+            
             # Initialize edit session tracking
             self.initialize_edit_session()
             
@@ -1250,9 +1328,6 @@ class VisualPDFSplitterApp:
             total_pages = len(self.pdf_document)
             self.page_thumbnails = [None] * total_pages  # Pre-allocate list with correct size
             
-            # Ensure page_rotations is initialized
-            if not hasattr(self, 'page_rotations'):
-                self.page_rotations = {}
             
             # Show progress
             self.root.after(0, lambda: self.progress_bar.grid(row=3, column=0, sticky=(tk.W, tk.E), pady=(10, 0)))
@@ -1293,10 +1368,10 @@ class VisualPDFSplitterApp:
             # Verify thumbnails were created (allow some failures)
             failed_count = self.page_thumbnails.count(None)
             if failed_count > 0:
-                print(f"Warning: {failed_count} thumbnails failed to generate (continuing anyway)")
+                pass
                 
             # Update UI on main thread
-            self.root.after(0, self.display_thumbnails)
+            self.root.after(0, lambda: self.display_thumbnails(force_rebuild=True))
             self.root.after(0, lambda: self.progress_bar.grid_remove())
             
             # Set status based on success/failure rate
@@ -1308,23 +1383,23 @@ class VisualPDFSplitterApp:
             
         except Exception as e:
             # Log error to console but don't show popup
-            print(f"Error generating thumbnails: {e}")
+            pass
             self.root.after(0, lambda: self.status_var.set("Error generating thumbnails - check console"))
             self.root.after(0, lambda: self.progress_bar.grid_remove())
             
-    def display_thumbnails(self):
+    def display_thumbnails(self, force_rebuild=False):
         """Display thumbnail images in the canvas"""
-        # Clear existing thumbnails
-        for widget in self.thumbnails_frame.winfo_children():
-            widget.destroy()
-        self.page_widgets.clear()
+        # Only clear existing thumbnails if force_rebuild is True or if we need to rebuild
+        # This prevents flickering during reordering operations
+        if force_rebuild or not hasattr(self, '_thumbnails_displayed'):
+            for widget in self.thumbnails_frame.winfo_children():
+                widget.destroy()
+            self.page_widgets.clear()
+            self._thumbnails_displayed = False
         
         if not self.page_thumbnails:
             return
             
-        # Ensure page_rotations is initialized
-        if not hasattr(self, 'page_rotations'):
-            self.page_rotations = {}
             
         # Calculate grid layout based on view mode
         canvas_width = self.canvas.winfo_width()
@@ -1359,7 +1434,6 @@ class VisualPDFSplitterApp:
             
             # Skip if thumbnail failed to generate
             if photo is None:
-                print(f"Skipping page {page_index + 1} - thumbnail generation failed")
                 continue
                 
             page_number = page_index + 1  # Display page number (1-based)
@@ -1504,6 +1578,9 @@ class VisualPDFSplitterApp:
         # Update scroll region and canvas size
         self.thumbnails_frame.update_idletasks()
         self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+        
+        # Mark thumbnails as successfully displayed
+        self._thumbnails_displayed = True
         
         # Update selection display
         self.update_selection_display()
@@ -1727,7 +1804,6 @@ class VisualPDFSplitterApp:
         
     def rotate_page(self, page_number, angle):
         """Rotate a specific page by the given angle"""
-        print(f"Rotating page {page_number} by {angle} degrees")  # Debug
         
         # Update rotation for this page
         current_rotation = self.page_rotations.get(page_number, 0)
@@ -1739,7 +1815,6 @@ class VisualPDFSplitterApp:
         else:
             self.page_rotations[page_number] = new_rotation
         
-        print(f"Page {page_number} rotation: {current_rotation}° → {new_rotation}°")  # Debug
         
         # Update status
         if new_rotation == 0:
@@ -1799,7 +1874,7 @@ class VisualPDFSplitterApp:
                     except ValueError:
                         pass
                     
-                    if self.reorder_mode and display_index is not None:
+                    if self.edit_mode and display_index is not None:
                         page_text = f"#{display_index + 1}: Page {page_number}{rotation_text}"
                     else:
                         page_text = f"Page {page_number}{rotation_text}"
@@ -1808,7 +1883,7 @@ class VisualPDFSplitterApp:
                     break
                 
         except Exception as e:
-            print(f"Error regenerating thumbnail for page {page_number}: {e}")
+            pass
             messagebox.showerror("Error", f"Failed to rotate page {page_number}:\n{str(e)}")
             
     def clear_ranges_only(self):
@@ -1917,25 +1992,86 @@ class VisualPDFSplitterApp:
         if self.pdf_document:
             if previous_view_mode != self.view_mode:
                 self.status_var.set(f"Updating to {view_name} view...")
+                # Only do full regeneration when view mode changes
+                threading.Thread(target=self.generate_thumbnails, daemon=True).start()
             else:
                 self.status_var.set("Updating thumbnail size...")
-            threading.Thread(target=self.generate_thumbnails, daemon=True).start()
+                # For size-only changes, just regenerate existing thumbnails more efficiently
+                threading.Thread(target=self.regenerate_thumbnails_for_zoom, daemon=True).start()
+            
+    def regenerate_thumbnails_for_zoom(self):
+        """Efficiently regenerate thumbnails for zoom changes without losing state"""
+        if not self.pdf_document or not self.page_thumbnails:
+            return
+            
+        try:
+            total_pages = len(self.page_thumbnails)
+            
+            # Preserve page order and deleted pages during zoom regeneration
+            preserved_order = self.page_order.copy() if hasattr(self, 'page_order') else list(range(total_pages))
+            preserved_deleted = self.deleted_pages.copy() if hasattr(self, 'deleted_pages') else set()
+            
+            # Generate new thumbnails at the new size
+            new_thumbnails = [None] * total_pages
+            
+            for page_num in range(total_pages):
+                if page_num in preserved_deleted:
+                    continue  # Skip deleted pages
+                    
+                try:
+                    # Show progress
+                    self.root.after(0, lambda p=page_num, t=total_pages: 
+                                   self.status_var.set(f"Updating thumbnails... {p+1}/{t}"))
+                    
+                    page = self.pdf_document[page_num]
+                    page_rect = page.rect
+                    
+                    # Calculate zoom factor to fit thumbnail size
+                    zoom = self.thumbnail_size / max(page_rect.width, page_rect.height)
+                    
+                    # Get rotation for this page
+                    rotation = self.page_rotations.get(page_num, 0)
+                    
+                    # Create image with proper rotation
+                    mat = fitz.Matrix(zoom, zoom).prerotate(rotation)
+                    pix = page.get_pixmap(matrix=mat)
+                    img_data = pix.tobytes("ppm")
+                    img = Image.open(io.BytesIO(img_data))
+                    
+                    # Convert to PhotoImage
+                    photo = ImageTk.PhotoImage(img)
+                    new_thumbnails[page_num] = photo
+                    
+                except Exception as e:
+                    pass
+                    new_thumbnails[page_num] = None
+            
+            # Update thumbnails list atomically
+            self.page_thumbnails = new_thumbnails
+            
+            # Restore order and state
+            self.page_order = preserved_order
+            self.deleted_pages = preserved_deleted
+            
+            # Update display with the new thumbnails
+            self.root.after(0, lambda: self.display_thumbnails(force_rebuild=True))
+            self.root.after(0, lambda: self.status_var.set("Thumbnails updated"))
+            
+        except Exception as e:
+            pass
+            self.root.after(0, lambda: self.status_var.set("Error updating thumbnails"))
             
     def split_and_save(self):
         """Split PDF and save selected ranges"""
-        print("Split and save button clicked!")  # Debug
         
         if not self.pdf_document and not self.pdf_list:
-            print("No PDF document loaded")  # Debug
             messagebox.showwarning("Warning", "Please load a PDF file or folder first.")
             return
             
         if not self.selected_ranges:
-            print("No ranges selected")  # Debug
             messagebox.showwarning("Warning", "Please select at least one page range first.")
             return
             
-        print(f"Selected ranges: {self.selected_ranges}")  # Debug
         
         # Get filename choice from user
         try:
@@ -1950,7 +2086,6 @@ class VisualPDFSplitterApp:
         if not chosen_filename:
             return
             
-        print(f"Opening save dialog with chosen name: {chosen_filename}")  # Debug
         
         save_path = filedialog.asksaveasfilename(
             title="Save Split PDF as ZIP",
@@ -1959,10 +2094,8 @@ class VisualPDFSplitterApp:
             filetypes=[("ZIP files", "*.zip"), ("All files", "*.*")]
         )
         
-        print(f"Save path selected: {save_path}")  # Debug
         
         if not save_path:
-            print("No save path selected, cancelling")  # Debug
             return
             
         # Split directly in main thread for debugging
@@ -1971,7 +2104,6 @@ class VisualPDFSplitterApp:
     def _split_pdf_direct(self, save_path):
         """Split PDF directly (for debugging)"""
         try:
-            print(f"Starting PDF split to: {save_path}")  # Debug
             
             # Show progress bar
             self.progress_bar.grid(row=3, column=0, sticky=(tk.W, tk.E), pady=(10, 0))
@@ -1982,14 +2114,12 @@ class VisualPDFSplitterApp:
             # Create ZIP file
             with zipfile.ZipFile(save_path, 'w', zipfile.ZIP_DEFLATED) as zip_file:
                 total_ranges = len(self.selected_ranges)
-                print(f"Processing {total_ranges} ranges")  # Debug
                 
                 for i, range_data in enumerate(self.selected_ranges):
                     start_page = range_data['start'] - 1  # Convert to 0-indexed
                     end_page = range_data['end'] - 1
                     pdf_source_path = range_data['pdf_path']
                     
-                    print(f"Processing range {i+1}: pages {start_page+1}-{end_page+1} from {pdf_source_path}")  # Debug
                     
                     # Update progress
                     progress = (i / total_ranges) * 90
@@ -2004,7 +2134,6 @@ class VisualPDFSplitterApp:
                         
                         # Validate range
                         if start_page < 0 or end_page >= total_pdf_pages or start_page > end_page:
-                            print(f"Invalid range: {start_page+1}-{end_page+1}, skipping")  # Debug
                             continue
                         
                         # Create new PDF for this range
@@ -2026,7 +2155,6 @@ class VisualPDFSplitterApp:
                                         page = page.rotate(270)
                                 
                                 pdf_writer.add_page(page)
-                                print(f"Added page {page_num+1}")  # Debug
                         
                         # Write PDF to memory
                         pdf_buffer = io.BytesIO()
@@ -2034,7 +2162,6 @@ class VisualPDFSplitterApp:
                         pdf_buffer.seek(0)
                         pdf_data = pdf_buffer.getvalue()
                         
-                        print(f"Generated PDF data: {len(pdf_data)} bytes")  # Debug
                         
                         # Generate filename
                         try:
@@ -2047,7 +2174,6 @@ class VisualPDFSplitterApp:
                         else:
                             filename = f"{base_name}_pages_{start_page + 1}-{end_page + 1}.pdf"
                         
-                        print(f"Creating file in ZIP: {filename}")  # Debug
                         
                         # Add to ZIP
                         zip_file.writestr(filename, pdf_data)
@@ -2057,7 +2183,6 @@ class VisualPDFSplitterApp:
             self.status_var.set("PDF split successfully!")
             self.root.update()
             
-            print("Split completed successfully!")  # Debug
             
             messagebox.showinfo("Success", 
                 f"PDF split into {len(self.selected_ranges)} files successfully!\n\n"
@@ -2065,7 +2190,6 @@ class VisualPDFSplitterApp:
                 f"Files created: {len(self.selected_ranges)} PDFs in ZIP")
             
         except Exception as e:
-            print(f"Error during split: {e}")  # Debug
             import traceback
             traceback.print_exc()  # Debug
             
@@ -2075,7 +2199,6 @@ class VisualPDFSplitterApp:
         finally:
             # Hide progress bar
             self.progress_bar.grid_remove()
-            print("Split operation finished")  # Debug
             
     def on_canvas_configure(self, event):
         """Handle canvas resize"""
@@ -2224,8 +2347,8 @@ class VisualPDFSplitterApp:
 
 📁 FOLDER MODE:
 • Select a folder containing multiple PDF files
-• Use ⬆️⬇️ keys to navigate between PDFs
-• Use ⬅️➡️ keys to scroll through pages
+• Use ⬅️➡️ keys to navigate between PDFs
+• Use ⬆️⬇️ keys to scroll through pages
 • Select ranges from any PDF in the folder
 
 ✏️ EDIT MODE:
@@ -2735,7 +2858,7 @@ For issues or questions, please refer to the documentation or contact support.""
             return photo
             
         except Exception as e:
-            print(f"Error generating crop thumbnail: {e}")
+            pass
             return None
         
     def get_page_widget(self, page_num):
@@ -2996,6 +3119,422 @@ For issues or questions, please refer to the documentation or contact support.""
             
         except Exception as e:
             messagebox.showerror("Error", f"Failed to extract crops as PNG:\n{str(e)}")
+
+    def merge_two_pdfs(self):
+        """Merge two PDFs from the loaded PDF list"""
+        if len(self.pdf_list) < 2:
+            messagebox.showwarning("Warning", "Please load at least two PDF files to merge.\nUse 'Open Folder' to load multiple PDFs or 'Add PDF' to merge with external file.")
+            return
+            
+        # Create selection dialog for two PDFs
+        self.show_pdf_merge_dialog()
+        
+    def merge_add_external(self):
+        """Merge current PDF with an external PDF file"""
+        if not self.pdf_document:
+            messagebox.showwarning("Warning", "Please load a PDF file first.")
+            return
+            
+        # Select external PDF file to merge with
+        external_path = filedialog.askopenfilename(
+            title="Select PDF to merge with current document",
+            filetypes=[("PDF files", "*.pdf"), ("All files", "*.*")]
+        )
+        
+        if not external_path:
+            return
+            
+        # Show merge order dialog
+        self.show_external_merge_dialog(external_path)
+        
+    def show_pdf_merge_dialog(self):
+        """Show dialog to select two PDFs from loaded list for merging"""
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Merge Two PDFs")
+        dialog.geometry("600x400")
+        dialog.transient(self.root)
+        dialog.grab_set()
+        
+        # Center dialog
+        dialog.geometry("+%d+%d" % (self.root.winfo_rootx() + 100, self.root.winfo_rooty() + 100))
+        
+        main_frame = ttk.Frame(dialog)
+        main_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
+        
+        ttk.Label(main_frame, text="Select Two PDFs to Merge", font=('Segoe UI', 12, 'bold')).pack(pady=(0, 10))
+        ttk.Label(main_frame, text="Choose the order for merging:", font=('Segoe UI', 10)).pack(pady=(0, 10))
+        
+        # First PDF selection
+        first_frame = ttk.Frame(main_frame)
+        first_frame.pack(fill=tk.X, pady=5)
+        
+        ttk.Label(first_frame, text="First PDF:", font=('Segoe UI', 10, 'bold')).pack(anchor=tk.W)
+        first_var = tk.StringVar()
+        first_combo = ttk.Combobox(first_frame, textvariable=first_var, state='readonly', width=70)
+        first_combo['values'] = [os.path.basename(pdf) for pdf in self.pdf_list]
+        first_combo.pack(fill=tk.X, pady=(5, 0))
+        
+        # Second PDF selection
+        second_frame = ttk.Frame(main_frame)
+        second_frame.pack(fill=tk.X, pady=15)
+        
+        ttk.Label(second_frame, text="Second PDF:", font=('Segoe UI', 10, 'bold')).pack(anchor=tk.W)
+        second_var = tk.StringVar()
+        second_combo = ttk.Combobox(second_frame, textvariable=second_var, state='readonly', width=70)
+        second_combo['values'] = [os.path.basename(pdf) for pdf in self.pdf_list]
+        second_combo.pack(fill=tk.X, pady=(5, 0))
+        
+        # Set default selections if available
+        if len(self.pdf_list) >= 2:
+            first_combo.set(os.path.basename(self.pdf_list[0]))
+            second_combo.set(os.path.basename(self.pdf_list[1]))
+        
+        # Preview frame
+        preview_frame = ttk.LabelFrame(main_frame, text="Merge Preview", padding=10)
+        preview_frame.pack(fill=tk.BOTH, expand=True, pady=10)
+        
+        preview_text = tk.Text(preview_frame, height=8, wrap=tk.WORD, state=tk.DISABLED)
+        preview_text.pack(fill=tk.BOTH, expand=True)
+        
+        def update_preview():
+            first_idx = first_combo.current()
+            second_idx = second_combo.current()
+            
+            if first_idx >= 0 and second_idx >= 0 and first_idx != second_idx:
+                first_pdf = self.pdf_list[first_idx]
+                second_pdf = self.pdf_list[second_idx]
+                
+                try:
+                    first_doc = self.pdf_documents.get(first_pdf) or fitz.open(first_pdf)
+                    second_doc = self.pdf_documents.get(second_pdf) or fitz.open(second_pdf)
+                    
+                    preview_text.config(state=tk.NORMAL)
+                    preview_text.delete(1.0, tk.END)
+                    preview_text.insert(tk.END, f"Merged PDF will contain:\n\n")
+                    preview_text.insert(tk.END, f"📄 {os.path.basename(first_pdf)} ({len(first_doc)} pages)\n")
+                    preview_text.insert(tk.END, f"📄 {os.path.basename(second_pdf)} ({len(second_doc)} pages)\n\n")
+                    preview_text.insert(tk.END, f"Total pages: {len(first_doc) + len(second_doc)}")
+                    preview_text.config(state=tk.DISABLED)
+                    
+                except Exception as e:
+                    preview_text.config(state=tk.NORMAL)
+                    preview_text.delete(1.0, tk.END)
+                    preview_text.insert(tk.END, f"Error reading PDF info: {str(e)}")
+                    preview_text.config(state=tk.DISABLED)
+        
+        first_combo.bind('<<ComboboxSelected>>', lambda e: update_preview())
+        second_combo.bind('<<ComboboxSelected>>', lambda e: update_preview())
+        
+        # Buttons
+        button_frame = ttk.Frame(main_frame)
+        button_frame.pack(fill=tk.X, pady=10)
+        
+        def on_merge():
+            first_idx = first_combo.current()
+            second_idx = second_combo.current()
+            
+            if first_idx < 0 or second_idx < 0:
+                messagebox.showwarning("Warning", "Please select both PDFs to merge.")
+                return
+                
+            if first_idx == second_idx:
+                messagebox.showwarning("Warning", "Please select two different PDFs.")
+                return
+                
+            dialog.destroy()
+            self.perform_merge(self.pdf_list[first_idx], self.pdf_list[second_idx])
+        
+        ttk.Button(button_frame, text="Cancel", command=dialog.destroy).pack(side=tk.RIGHT, padx=(10, 0))
+        ttk.Button(button_frame, text="Merge PDFs", command=on_merge, style='Accent.TButton').pack(side=tk.RIGHT)
+        
+        # Update preview initially
+        self.root.after(100, update_preview)
+        
+    def show_external_merge_dialog(self, external_path):
+        """Show dialog to choose merge order with external PDF"""
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Merge with External PDF")
+        dialog.geometry("500x300")
+        dialog.transient(self.root)
+        dialog.grab_set()
+        
+        # Center dialog
+        dialog.geometry("+%d+%d" % (self.root.winfo_rootx() + 150, self.root.winfo_rooty() + 150))
+        
+        main_frame = ttk.Frame(dialog)
+        main_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
+        
+        ttk.Label(main_frame, text="Choose Merge Order", font=('Segoe UI', 12, 'bold')).pack(pady=(0, 10))
+        
+        # Current PDF info
+        current_frame = ttk.LabelFrame(main_frame, text="Current PDF", padding=10)
+        current_frame.pack(fill=tk.X, pady=5)
+        
+        current_name = os.path.basename(self.pdf_path) if self.pdf_path else "Current Document"
+        current_pages = len(self.pdf_document) if self.pdf_document else 0
+        ttk.Label(current_frame, text=f"📄 {current_name} ({current_pages} pages)").pack(anchor=tk.W)
+        
+        # External PDF info
+        external_frame = ttk.LabelFrame(main_frame, text="External PDF", padding=10)
+        external_frame.pack(fill=tk.X, pady=5)
+        
+        external_name = os.path.basename(external_path)
+        try:
+            external_doc = fitz.open(external_path)
+            external_pages = len(external_doc)
+            external_doc.close()
+        except:
+            external_pages = "?"
+        
+        ttk.Label(external_frame, text=f"📄 {external_name} ({external_pages} pages)").pack(anchor=tk.W)
+        
+        # Order selection
+        order_frame = ttk.LabelFrame(main_frame, text="Merge Order", padding=10)
+        order_frame.pack(fill=tk.X, pady=10)
+        
+        order_var = tk.StringVar(value="current_first")
+        
+        ttk.Radiobutton(order_frame, text=f"Current PDF first, then {external_name}", 
+                       variable=order_var, value="current_first").pack(anchor=tk.W, pady=2)
+        ttk.Radiobutton(order_frame, text=f"{external_name} first, then Current PDF", 
+                       variable=order_var, value="external_first").pack(anchor=tk.W, pady=2)
+        
+        # Buttons
+        button_frame = ttk.Frame(main_frame)
+        button_frame.pack(fill=tk.X, pady=10)
+        
+        def on_merge():
+            if order_var.get() == "current_first":
+                first_path = self.pdf_path
+                second_path = external_path
+            else:
+                first_path = external_path
+                second_path = self.pdf_path
+                
+            dialog.destroy()
+            self.perform_merge(first_path, second_path)
+        
+        ttk.Button(button_frame, text="Cancel", command=dialog.destroy).pack(side=tk.RIGHT, padx=(10, 0))
+        ttk.Button(button_frame, text="Merge PDFs", command=on_merge, style='Accent.TButton').pack(side=tk.RIGHT)
+        
+    def perform_merge(self, first_pdf_path, second_pdf_path):
+        """Perform the actual PDF merge operation"""
+        try:
+            self.status_var.set("Merging PDFs...")
+            
+            # Store the first PDF name for default naming
+            self.merged_first_pdf_name = Path(first_pdf_path).stem
+            print(f"DEBUG: Stored merged PDF name: '{self.merged_first_pdf_name}' from path: '{first_pdf_path}'")
+            
+            # Create temporary file for merged PDF
+            import tempfile
+            temp_dir = tempfile.gettempdir()
+            temp_filename = f"merged_pdf_{int(time.time())}.pdf"
+            self.merged_temp_path = os.path.join(temp_dir, temp_filename)
+            
+            # Open both PDFs
+            first_doc = fitz.open(first_pdf_path)
+            second_doc = fitz.open(second_pdf_path)
+            
+            # Create new merged document
+            merged_doc = fitz.open()  # Create empty document
+            
+            # Add all pages from first PDF
+            merged_doc.insert_pdf(first_doc)
+            
+            # Add all pages from second PDF
+            merged_doc.insert_pdf(second_doc)
+            
+            # Save merged PDF to temporary file
+            merged_doc.save(self.merged_temp_path)
+            
+            # Close documents
+            first_doc.close()
+            second_doc.close()
+            merged_doc.close()
+            
+            # Load the merged PDF for editing
+            self.load_merged_pdf()
+            
+            self.status_var.set(f"PDFs merged successfully - {len(self.pdf_document)} pages total")
+            
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to merge PDFs:\n{str(e)}")
+            self.status_var.set("Error merging PDFs")
+            
+    def load_merged_pdf(self):
+        """Load the merged PDF and enable edit mode"""
+        try:
+            # Clear existing state
+            self.clear_all_state()
+            
+            # Set merged PDF flags
+            self.is_merged_pdf = True
+            self.pdf_path = self.merged_temp_path
+            
+            # Load the merged document
+            self.pdf_document = fitz.open(self.merged_temp_path)
+            
+            if len(self.pdf_document) == 0:
+                messagebox.showerror("Error", "Merged PDF appears to be empty.")
+                return
+                
+            # Update UI
+            self.file_label.config(text=f"Merged PDF - {len(self.pdf_document)} pages", foreground='darkgreen')
+            
+            # Initialize for editing
+            self.initialize_edit_session()
+            
+            # Enable edit mode automatically
+            self.edit_mode_var.set(True)
+            self.toggle_edit_mode()
+            
+            # Show the save merged button
+            self.update_merge_ui()
+            
+            # Generate thumbnails
+            self.status_var.set("Generating thumbnails for merged PDF...")
+            threading.Thread(target=self.generate_thumbnails, daemon=True).start()
+            
+            # Show success message
+            messagebox.showinfo("Success", 
+                              f"PDFs merged successfully!\n\n"
+                              f"Total pages: {len(self.pdf_document)}\n"
+                              f"Edit mode enabled - you can reorder, delete, and rotate pages.\n"
+                              f"Use 'Save Merged PDF' when ready to save the final result.")
+            
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to load merged PDF:\n{str(e)}")
+            
+    def clear_all_state(self):
+        """Clear all application state before loading new PDF"""
+        # Clear thumbnails
+        if hasattr(self, 'page_thumbnails'):
+            self.page_thumbnails.clear()
+        
+        # Clear widgets
+        if hasattr(self, 'page_widgets'):
+            self.page_widgets.clear()
+            
+        # Clear selections
+        if hasattr(self, 'selected_ranges'):
+            self.selected_ranges.clear()
+            
+        # Clear crops
+        if hasattr(self, 'crop_rectangles'):
+            self.crop_rectangles.clear()
+            self.crop_thumbnails.clear()
+            
+        # Reset edit state
+        self.has_edited = False
+        self.deleted_pages.clear() if hasattr(self, 'deleted_pages') else None
+        self.page_rotations.clear() if hasattr(self, 'page_rotations') else None
+        
+        # Clear current selection
+        self.current_selection = {'start': None, 'end': None}
+        
+        # Disable modes
+        self.edit_mode = False
+        self.crop_mode = False
+        if hasattr(self, 'edit_mode_var'):
+            self.edit_mode_var.set(False)
+        if hasattr(self, 'crop_mode_var'):
+            self.crop_mode_var.set(False)
+            
+        # Reset merge state
+        self.is_merged_pdf = False
+        self.merged_first_pdf_name = None
+            
+        # Clear thumbnails frame
+        if hasattr(self, 'thumbnails_frame'):
+            for widget in self.thumbnails_frame.winfo_children():
+                widget.destroy()
+
+    def update_merge_ui(self):
+        """Update UI elements related to merge functionality"""
+        if hasattr(self, 'save_merged_btn'):
+            if self.is_merged_pdf:
+                self.save_merged_btn.pack(side=tk.LEFT, padx=(2, 0))
+            else:
+                self.save_merged_btn.pack_forget()
+
+    def save_merged_pdf(self):
+        """Save the merged and edited PDF"""
+        if not self.is_merged_pdf or not self.pdf_document:
+            messagebox.showwarning("Warning", "No merged PDF to save.")
+            return
+            
+        # Get save location with smart default naming
+        if self.merged_first_pdf_name:
+            default_name = f"{self.merged_first_pdf_name}_merged.pdf"
+            print(f"DEBUG: Using merged name '{self.merged_first_pdf_name}' -> default: '{default_name}'")
+        else:
+            default_name = "merged_document.pdf"
+            print(f"DEBUG: No merged name stored, using fallback: '{default_name}'")
+            
+        save_path = filedialog.asksaveasfilename(
+            title="Save Merged PDF",
+            defaultextension=".pdf",
+            initialfile=default_name,
+            filetypes=[("PDF files", "*.pdf"), ("All files", "*.*")]
+        )
+        
+        if not save_path:
+            return
+            
+        try:
+            self.status_var.set("Saving merged PDF...")
+            
+            # Create final PDF with all edits applied
+            merged_writer = PyPDF2.PdfWriter()
+            merged_reader = PyPDF2.PdfReader(self.merged_temp_path)
+            
+            # Apply page order, deletions, and rotations
+            for page_index in self.page_order:
+                if page_index in self.deleted_pages:
+                    continue
+                    
+                if page_index < len(merged_reader.pages):
+                    page = merged_reader.pages[page_index]
+                    
+                    # Apply rotation if set for this page (1-based)
+                    page_number_1based = page_index + 1
+                    if page_number_1based in self.page_rotations:
+                        rotation_angle = self.page_rotations[page_number_1based]
+                        if rotation_angle == 90:
+                            page = page.rotate(90)
+                        elif rotation_angle == 180:
+                            page = page.rotate(180)
+                        elif rotation_angle == 270:
+                            page = page.rotate(270)
+                    
+                    merged_writer.add_page(page)
+            
+            # Write final PDF
+            with open(save_path, 'wb') as output_file:
+                merged_writer.write(output_file)
+            
+            # Show success message
+            details = []
+            if self.has_edited:
+                details.append("reordered pages")
+            if self.deleted_pages:
+                details.append(f"removed {len(self.deleted_pages)} pages")
+            if self.page_rotations:
+                details.append(f"applied {len(self.page_rotations)} rotations")
+                
+            detail_text = f" ({', '.join(details)})" if details else ""
+            
+            messagebox.showinfo("Success", 
+                              f"Merged PDF saved successfully!\n\n"
+                              f"File: {os.path.basename(save_path)}\n"
+                              f"Pages: {len(merged_writer.pages)}{detail_text}")
+                              
+            self.status_var.set(f"Merged PDF saved: {os.path.basename(save_path)}")
+            
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to save merged PDF:\n{str(e)}")
+            self.status_var.set("Error saving merged PDF")
 
 def main():
     """Main application entry point"""
