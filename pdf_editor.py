@@ -420,7 +420,7 @@ class VisualPDFSplitterApp:
         
         # Help text
         help_text = ttk.Label(self.bulk_delete_frame, 
-                             text="Enter positions: 1,3,5 or 2-4 or -5 (up to page 5) or 5- (page 5 onwards)",
+                             text="Enter positions: 1,3,5 or 2-4,7-9 or -5 (pages 1-5) or 3- (page 3 onwards)",
                              font=(self.FONT_FAMILY, 8),
                              foreground='gray')
         help_text.pack(anchor=tk.W)
@@ -913,43 +913,38 @@ class VisualPDFSplitterApp:
             self.status_var.set(f"Deleted page {page_number}. {remaining_pages} pages remaining.")
     
     def parse_page_ranges(self, range_string):
-        """Parse page range string into list of page numbers
-        Supports formats:
-        - Single pages: 1,3,5
-        - Ranges: 2-5,7-9
-        - Delete all up to page: -5 (deletes pages 1 through 5)
-        - Delete page and all after: 5- (deletes page 5 through end)
-        """
+        """Parse page range string into list of page numbers"""
         if not range_string.strip():
             return []
             
         pages = set()
         try:
+            # Get current visible page count for range validation
+            current_visible_pages = [idx for idx in self.page_order if idx not in self.deleted_pages]
+            current_page_count = len(current_visible_pages)
+            
             # Split by commas and process each part
             parts = [part.strip() for part in range_string.split(',')]
             
-            # Get current visible page count for range validation
-            current_visible_pages = [idx for idx in self.page_order if idx not in self.deleted_pages]
-            max_page = len(current_visible_pages)
-            
             for part in parts:
                 if part.startswith('-') and len(part) > 1:
-                    # Handle "-5" format: delete all pages up to and including page 5
+                    # Handle "-[page]" syntax - delete all pages from 1 to page (inclusive)
                     end_page = int(part[1:].strip())
                     if end_page < 1:
-                        raise ValueError(f"Invalid page number: {end_page}")
-                    end_page = min(end_page, max_page)  # Cap at max available page
+                        raise ValueError(f"Page number must be positive: {part}")
+                    if end_page > current_page_count:
+                        raise ValueError(f"Page {end_page} exceeds current page count ({current_page_count})")
                     pages.update(range(1, end_page + 1))
-                    
                 elif part.endswith('-') and len(part) > 1:
-                    # Handle "5-" format: delete page 5 and all pages after
+                    # Handle "[page]-" syntax - delete all pages from page to end (inclusive)
                     start_page = int(part[:-1].strip())
                     if start_page < 1:
-                        raise ValueError(f"Invalid page number: {start_page}")
-                    pages.update(range(start_page, max_page + 1))
-                    
+                        raise ValueError(f"Page number must be positive: {part}")
+                    if start_page > current_page_count:
+                        raise ValueError(f"Page {start_page} exceeds current page count ({current_page_count})")
+                    pages.update(range(start_page, current_page_count + 1))
                 elif '-' in part and not part.startswith('-') and not part.endswith('-'):
-                    # Handle ranges like "2-5"
+                    # Handle standard ranges like "2-5"
                     start, end = part.split('-', 1)
                     start = int(start.strip())
                     end = int(end.strip())
@@ -958,6 +953,9 @@ class VisualPDFSplitterApp:
                         start, end = end, start  # Swap if reversed
                         
                     pages.update(range(start, end + 1))
+                elif part == '-':
+                    # Handle standalone "-" as invalid
+                    raise ValueError("Invalid format: standalone '-' is not allowed")
                 else:
                     # Handle single pages
                     page_num = int(part.strip())
@@ -966,7 +964,10 @@ class VisualPDFSplitterApp:
             return sorted(list(pages))
             
         except ValueError as e:
-            raise ValueError("Invalid format. Use: 1,3,5-7,10 or -5 (up to page 5) or 5- (page 5 onwards)")
+            if "invalid literal for int()" in str(e):
+                raise ValueError("Invalid format. Use numbers and ranges like: 1,3,5-7,10, or use -5 (pages 1-5) or 3- (page 3 onwards)")
+            else:
+                raise e
     
     def bulk_delete_pages(self):
         """Delete multiple pages based on user input (using current display positions)"""
