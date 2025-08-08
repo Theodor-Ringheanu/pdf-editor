@@ -799,8 +799,14 @@ class VisualPDFSplitterApp:
             # Clean up the temporary current file
             try:
                 os.remove(current_temp_path)
-            except:
+            except FileNotFoundError:
+                # File already removed, which is fine
                 pass
+            except PermissionError as e:
+                print(f"Warning: Could not remove temporary file due to permissions: {current_temp_path}")
+                self.status_var.set("Warning: Some temporary files could not be cleaned up")
+            except Exception as e:
+                print(f"Warning: Error removing temporary file {current_temp_path}: {e}")
             
             # Track modification for this specific PDF
             current_pdf_path = self.pdf_path
@@ -1126,7 +1132,9 @@ class VisualPDFSplitterApp:
             self.update_drag_ghost(event)
             
         except Exception as e:
-            pass
+            # Log drag ghost creation errors but don't interrupt user experience
+            print(f"Warning: Failed to create drag ghost: {e}")
+            self.status_var.set("Warning: Visual drag feedback unavailable")
     
     def update_drag_ghost(self, event):
         """Update ghost position"""
@@ -1233,7 +1241,9 @@ class VisualPDFSplitterApp:
                 source_widget['frame'].config(relief=tk.RAISED, borderwidth=2)
             
         except Exception as e:
-            pass
+            # Log drag end errors but ensure cleanup still happens
+            print(f"Warning: Error ending drag operation: {e}")
+            self.status_var.set("Warning: Drag operation completed with issues")
         finally:
             # Clear drag data
             self.drag_data = None
@@ -1285,9 +1295,15 @@ class VisualPDFSplitterApp:
             self.update_edit_status()
             
         except Exception as e:
-            pass
+            # Log regeneration errors and provide fallback
+            print(f"Warning: Error regenerating thumbnails: {e}")
+            self.status_var.set("Warning: Thumbnail regeneration had issues")
             # Simple fallback: just try to display what we have
-            self.display_thumbnails(force_rebuild=True)
+            try:
+                self.display_thumbnails(force_rebuild=True)
+            except Exception as e2:
+                print(f"Error: Even fallback thumbnail display failed: {e2}")
+                self.status_var.set("Error: Unable to display thumbnails")
     
     def reset_edit_session(self):
         """Reset pages to original order, restore deleted pages, and reset rotations"""
@@ -1979,7 +1995,7 @@ class VisualPDFSplitterApp:
         self._thumbnails_displayed = True
         
         # Update selection display
-        self.update_selection_display()
+        self.update_selection_display_with_validation()
         
     def on_page_hover(self, page_num, enter):
         """Handle page hover effects"""
@@ -1993,8 +2009,10 @@ class VisualPDFSplitterApp:
         if not target_widget:
             return
             
-        # Don't change color if page is selected or we're dragging
-        if self.is_page_selected(page_num) or (self.drag_data and not self.drag_data.get('has_moved', False)):
+        # Don't change color if page is selected, is the current start page, or we're dragging
+        if (self.is_page_selected(page_num) or 
+            page_num == self.current_selection.get('start') or 
+            (self.drag_data and not self.drag_data.get('has_moved', False))):
             return
             
         if enter:
@@ -2013,6 +2031,48 @@ class VisualPDFSplitterApp:
             if element in widget and widget[element]:
                 widget[element].config(bg=color)
             
+    def validate_state(self):
+        """Validate internal state consistency"""
+        try:
+            # Validate current_selection
+            if self.current_selection['start'] is not None:
+                if not isinstance(self.current_selection['start'], int) or self.current_selection['start'] < 1:
+                    self.current_selection['start'] = None
+                    return False
+                    
+            # Validate selected_ranges
+            valid_ranges = []
+            for range_data in self.selected_ranges:
+                if (isinstance(range_data, dict) and 
+                    'start' in range_data and 'end' in range_data and
+                    isinstance(range_data['start'], int) and isinstance(range_data['end'], int) and
+                    range_data['start'] >= 1 and range_data['end'] >= 1 and
+                    range_data['start'] <= range_data['end']):
+                    valid_ranges.append(range_data)
+            
+            if len(valid_ranges) != len(self.selected_ranges):
+                self.selected_ranges = valid_ranges
+                return False
+                
+            # Validate page_widgets consistency
+            if self.page_widgets:
+                for i, widget in enumerate(self.page_widgets):
+                    if widget is not None and 'page_num' not in widget:
+                        return False
+                        
+            return True
+        except Exception:
+            # If validation itself fails, reset to safe state
+            self.current_selection = {'start': None, 'end': None}
+            return False
+    
+    def reset_selection_state(self):
+        """Reset selection state to safe defaults"""
+        self.current_selection = {'start': None, 'end': None}
+        self.selected_ranges.clear()
+        self.update_ranges_list()
+        self.update_selection_display()
+        
     def is_page_selected(self, page_num):
         """Check if a page is currently selected"""
         # Check if it's the current start page
@@ -2027,41 +2087,93 @@ class VisualPDFSplitterApp:
         return False
         
     def on_page_click(self, page_num):
-        """Handle page thumbnail click"""
-        if self.current_selection['start'] is None:
-            # Start new selection
-            self.current_selection['start'] = page_num
-            self.current_selection['end'] = None
-            self.status_var.set(f"Selected start page {page_num}. Click another page to complete range.")
-            
-        else:
-            # Complete selection
-            start = self.current_selection['start']
-            end = page_num
-            
-            if end < start:
-                start, end = end, start
+        """Handle page thumbnail click with validation and error handling"""
+        try:
+            # Validate inputs
+            if not isinstance(page_num, int) or page_num < 1:
+                self.status_var.set("Error: Invalid page number")
+                return
                 
-            # Add to selected ranges with PDF file info
-            pdf_filename = os.path.basename(self.pdf_path) if self.pdf_path else "Unknown"
-            self.selected_ranges.append({
-                'start': start, 
-                'end': end,
-                'pages': end - start + 1,
-                'pdf_path': self.pdf_path,
-                'pdf_filename': pdf_filename
-            })
+            # Validate state before proceeding
+            if not self.validate_state():
+                self.status_var.set("Warning: Selection state was reset due to inconsistency")
+                
+            # Ensure we have a valid PDF loaded
+            if not self.pdf_document or not self.pdf_path:
+                messagebox.showwarning("Warning", "No PDF file is currently loaded.")
+                return
+                
+            # Get current visible page count for validation
+            current_visible_pages = [idx for idx in self.page_order if idx not in self.deleted_pages]
+            current_page_count = len(current_visible_pages)
             
-            self.update_ranges_list()
-            
-            # Reset for next selection
-            self.current_selection = {'start': None, 'end': None}
-            
-            if start == end:
-                self.status_var.set(f"Added single page {start}. Click another page to start new range.")
+            if page_num > current_page_count:
+                messagebox.showerror("Error", f"Page {page_num} does not exist. Current PDF has {current_page_count} pages.")
+                return
+                
+            if self.current_selection['start'] is None:
+                # Start new selection
+                self.current_selection['start'] = page_num
+                self.current_selection['end'] = None
+                self.status_var.set(f"Selected start page {page_num}. Click another page to complete range.")
+                
             else:
-                self.status_var.set(f"Added pages {start}-{end}. Click another page to start new range.")
+                # Complete selection
+                start = self.current_selection['start']
+                end = page_num
+                
+                if end < start:
+                    start, end = end, start
+                    
+                # Validate the range
+                if start < 1 or end > current_page_count:
+                    self.reset_selection_state()
+                    messagebox.showerror("Error", f"Invalid page range {start}-{end}. Valid range: 1-{current_page_count}")
+                    return
+                    
+                # Add to selected ranges with PDF file info
+                try:
+                    pdf_filename = os.path.basename(self.pdf_path) if self.pdf_path else "Unknown"
+                    range_data = {
+                        'start': start, 
+                        'end': end,
+                        'pages': end - start + 1,
+                        'pdf_path': self.pdf_path,
+                        'pdf_filename': pdf_filename
+                    }
+                    self.selected_ranges.append(range_data)
+                    
+                    # Update ranges display
+                    self.update_ranges_list()
+                    
+                    # Reset for next selection
+                    self.current_selection = {'start': None, 'end': None}
+                    
+                    if start == end:
+                        self.status_var.set(f"Added single page {start}. Click another page to start new range.")
+                    else:
+                        self.status_var.set(f"Added pages {start}-{end}. Click another page to start new range.")
+                        
+                except Exception as e:
+                    self.reset_selection_state()
+                    messagebox.showerror("Error", f"Failed to add page range: {str(e)}")
+                    return
+                    
+            self.update_selection_display_with_validation()
             
+        except Exception as e:
+            # Reset state on any unexpected error
+            self.reset_selection_state()
+            messagebox.showerror("Error", f"An unexpected error occurred during page selection: {str(e)}")
+            self.status_var.set("Selection reset due to error")
+        
+    def update_selection_display_with_validation(self):
+        """Update visual selection indicators with state validation"""
+        # Validate and repair state before updating display
+        if not self.validate_state():
+            print("Warning: Fixed inconsistent selection state")
+            self.status_var.set("Warning: Selection state was automatically corrected")
+        
         self.update_selection_display()
         
     def update_selection_display(self):
@@ -2291,7 +2403,7 @@ class VisualPDFSplitterApp:
             self.crop_counter = 0
             
         self.update_ranges_list()
-        self.update_selection_display()
+        self.update_selection_display_with_validation()
         self.update_crop_display()
         
         if self.crop_mode and self.crop_rectangles:
