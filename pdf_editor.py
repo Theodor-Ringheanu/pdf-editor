@@ -892,23 +892,21 @@ class VisualPDFSplitterApp:
             messagebox.showwarning("Warning", "Please load a PDF file first.")
             return
             
-    def save_edited_pdf(self):
-        """Save the PDF with current edits (order, deletions, rotations)"""
-        if not self.pdf_document:
-            messagebox.showwarning("Warning", "Please load a PDF file first.")
-            return
-            
         if not self.has_edited and not self.deleted_pages and not self.page_rotations:
             messagebox.showinfo("Info", "No edits to save - PDF is in original state.")
             return
             
-        # Get save location
+        # Get filename choice from user
         default_name = Path(self.pdf_path).stem + "_edited.pdf" if self.pdf_path else "edited.pdf"
+        
+        chosen_filename = self.get_custom_filename(default_name, "PDF")
+        if not chosen_filename:
+            return
         
         save_path = filedialog.asksaveasfilename(
             title="Save Edited PDF",
             defaultextension=".pdf",
-            initialfile=default_name,
+            initialfile=chosen_filename,
             filetypes=[("PDF files", "*.pdf"), ("All files", "*.*")]
         )
         
@@ -1939,7 +1937,7 @@ class VisualPDFSplitterApp:
             
         print(f"Selected ranges: {self.selected_ranges}")  # Debug
         
-        # Get save location
+        # Get filename choice from user
         try:
             if len(self.pdf_list) == 1:
                 default_name = Path(self.pdf_list[0]).stem + "_split.zip"
@@ -1947,13 +1945,17 @@ class VisualPDFSplitterApp:
                 default_name = "multi_pdf_split.zip"
         except:
             default_name = "split_pdf.zip"
+        
+        chosen_filename = self.get_custom_filename(default_name, "ZIP")
+        if not chosen_filename:
+            return
             
-        print(f"Opening save dialog with default name: {default_name}")  # Debug
+        print(f"Opening save dialog with chosen name: {chosen_filename}")  # Debug
         
         save_path = filedialog.asksaveasfilename(
             title="Save Split PDF as ZIP",
             defaultextension=".zip",
-            initialfile=default_name,
+            initialfile=chosen_filename,
             filetypes=[("ZIP files", "*.zip"), ("All files", "*.*")]
         )
         
@@ -2089,6 +2091,127 @@ class VisualPDFSplitterApp:
         """Handle thumbnails frame resize"""
         self.canvas.configure(scrollregion=self.canvas.bbox("all"))
         
+    def get_custom_filename(self, default_name, file_type="PDF", pattern_preview=None):
+        """Show dialog to choose between default or custom filename
+        
+        Args:
+            default_name: The default filename the app would use
+            file_type: Type of file being saved (PDF, ZIP, etc.)
+            pattern_preview: For multi-file saves, show pattern preview
+            
+        Returns:
+            str: Chosen filename, or None if cancelled
+        """
+        dialog = tk.Toplevel(self.root)
+        dialog.title(f"Choose {file_type} Filename")
+        dialog.geometry("500x300")
+        dialog.resizable(False, False)
+        dialog.transient(self.root)
+        dialog.grab_set()
+        
+        # Center the dialog
+        dialog.update_idletasks()
+        x = (dialog.winfo_screenwidth() // 2) - (dialog.winfo_width() // 2)
+        y = (dialog.winfo_screenheight() // 2) - (dialog.winfo_height() // 2)
+        dialog.geometry(f"+{x}+{y}")
+        
+        result = {"filename": None}
+        
+        # Main frame
+        main_frame = ttk.Frame(dialog, padding="20")
+        main_frame.pack(fill=tk.BOTH, expand=True)
+        
+        # Title
+        ttk.Label(main_frame, text=f"How do you want to name your {file_type} file?", 
+                 font=(self.FONT_FAMILY, 12, "bold")).pack(pady=(0, 15))
+        
+        # Choice variable
+        choice_var = tk.StringVar(value="default")
+        
+        # Default option
+        default_frame = ttk.Frame(main_frame)
+        default_frame.pack(fill=tk.X, pady=5)
+        
+        ttk.Radiobutton(default_frame, text="Use default naming:", 
+                       variable=choice_var, value="default").pack(anchor=tk.W)
+        
+        default_label = ttk.Label(default_frame, text=default_name, 
+                                 font=(self.FONT_FAMILY, 9), foreground="blue")
+        default_label.pack(anchor=tk.W, padx=(25, 0))
+        
+        if pattern_preview:
+            pattern_label = ttk.Label(default_frame, text=pattern_preview, 
+                                    font=(self.FONT_FAMILY, 8), foreground="gray")
+            pattern_label.pack(anchor=tk.W, padx=(25, 0))
+        
+        # Separator
+        ttk.Separator(main_frame, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=15)
+        
+        # Custom option
+        custom_frame = ttk.Frame(main_frame)
+        custom_frame.pack(fill=tk.X, pady=5)
+        
+        ttk.Radiobutton(custom_frame, text="Use custom name:", 
+                       variable=choice_var, value="custom").pack(anchor=tk.W)
+        
+        # Custom input
+        input_frame = ttk.Frame(custom_frame)
+        input_frame.pack(fill=tk.X, padx=(25, 0), pady=5)
+        
+        custom_entry = ttk.Entry(input_frame, font=(self.FONT_FAMILY, 10))
+        custom_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        
+        # Set default custom name (without extension)
+        base_name = Path(default_name).stem
+        custom_entry.insert(0, base_name)
+        
+        # Extension label
+        ext = Path(default_name).suffix
+        ttk.Label(input_frame, text=ext, font=(self.FONT_FAMILY, 10)).pack(side=tk.LEFT, padx=(5, 0))
+        
+        # Buttons
+        button_frame = ttk.Frame(main_frame)
+        button_frame.pack(fill=tk.X, pady=(20, 0))
+        
+        def on_ok():
+            if choice_var.get() == "default":
+                result["filename"] = default_name
+            else:
+                custom_name = custom_entry.get().strip()
+                if not custom_name:
+                    messagebox.showwarning("Warning", "Please enter a custom filename.")
+                    return
+                # Add extension if not present
+                if not custom_name.endswith(ext):
+                    custom_name += ext
+                result["filename"] = custom_name
+            dialog.destroy()
+        
+        def on_cancel():
+            dialog.destroy()
+        
+        ttk.Button(button_frame, text="Cancel", command=on_cancel).pack(side=tk.RIGHT, padx=(5, 0))
+        ttk.Button(button_frame, text="OK", command=on_ok).pack(side=tk.RIGHT)
+        
+        # Enable custom entry when custom radio is selected
+        def on_choice_change():
+            if choice_var.get() == "custom":
+                custom_entry.config(state=tk.NORMAL)
+                custom_entry.focus_set()
+                custom_entry.select_range(0, tk.END)
+            else:
+                custom_entry.config(state=tk.DISABLED)
+        
+        choice_var.trace_add("write", lambda *args: on_choice_change())
+        on_choice_change()  # Initial state
+        
+        # Handle Enter key
+        dialog.bind('<Return>', lambda e: on_ok())
+        dialog.bind('<Escape>', lambda e: on_cancel())
+        
+        dialog.wait_window()
+        return result["filename"]
+    
     def show_help(self):
         """Show help dialog"""
         help_text = """Visual PDF Splitter with Edit Mode - How to Use
@@ -2754,6 +2877,20 @@ For issues or questions, please refer to the documentation or contact support.""
             messagebox.showwarning("Warning", "No crop rectangles defined. Enter crop mode and select areas first.")
             return
             
+        # Get custom base name choice from user
+        if self.pdf_path:
+            default_base = Path(self.pdf_path).stem
+        else:
+            default_base = "document"
+        
+        pattern_preview = f"Example: {default_base}_page_1_crop_1.pdf, {default_base}_page_1_crop_2.pdf, ..."
+        chosen_base = self.get_custom_filename(default_base, "PDF", pattern_preview)
+        if not chosen_base:
+            return
+        
+        # Remove .pdf extension if user included it
+        chosen_base = Path(chosen_base).stem
+            
         # Get save directory
         save_dir = filedialog.askdirectory(title="Select Directory to Save Cropped PDFs")
         if not save_dir:
@@ -2782,9 +2919,8 @@ For issues or questions, please refer to the documentation or contact support.""
                     new_doc = fitz.open()
                     new_doc.insert_pdf(doc, from_page=page_index, to_page=page_index)
                     
-                    # Generate filename
-                    base_name = Path(crop_data['pdf_path']).stem
-                    filename = f"{base_name}_page_{page_num}_crop_{i+1}.pdf"
+                    # Generate filename using chosen base name
+                    filename = f"{chosen_base}_page_{page_num}_crop_{i+1}.pdf"
                     save_path = os.path.join(save_dir, filename)
                     
                     # Save cropped PDF
@@ -2805,6 +2941,20 @@ For issues or questions, please refer to the documentation or contact support.""
         if not self.crop_rectangles:
             messagebox.showwarning("Warning", "No crop rectangles defined. Enter crop mode and select areas first.")
             return
+            
+        # Get custom base name choice from user
+        if self.pdf_path:
+            default_base = Path(self.pdf_path).stem
+        else:
+            default_base = "document"
+        
+        pattern_preview = f"Example: {default_base}_page_1_crop_1.png, {default_base}_page_1_crop_2.png, ..."
+        chosen_base = self.get_custom_filename(default_base, "PNG", pattern_preview)
+        if not chosen_base:
+            return
+        
+        # Remove .png extension if user included it
+        chosen_base = Path(chosen_base).stem
             
         # Get save directory
         save_dir = filedialog.askdirectory(title="Select Directory to Save Cropped PNG files")
@@ -2831,9 +2981,8 @@ For issues or questions, please refer to the documentation or contact support.""
                     mat = fitz.Matrix(2.0, 2.0)  # 2x zoom for better quality
                     pix = page.get_pixmap(matrix=mat, clip=crop_rect)
                     
-                    # Generate filename
-                    base_name = Path(crop_data['pdf_path']).stem
-                    filename = f"{base_name}_page_{page_num}_crop_{i+1}.png"
+                    # Generate filename using chosen base name
+                    filename = f"{chosen_base}_page_{page_num}_crop_{i+1}.png"
                     save_path = os.path.join(save_dir, filename)
                     
                     # Save as PNG
