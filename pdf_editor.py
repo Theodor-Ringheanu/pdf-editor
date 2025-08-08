@@ -86,6 +86,9 @@ class VisualPDFSplitterApp:
         self.merged_temp_path = None  # Path to temporary merged PDF file
         self.merged_first_pdf_name = None  # Name of the first PDF used in merge for default naming
         
+        # Per-PDF modification tracking
+        self.pdf_modifications = {}  # Dict: {original_path: {'temp_path': str, 'original_path': str}}
+        
         # Colors for selection states
         self.colors = {
             'normal': '#f0f0f0',
@@ -620,7 +623,22 @@ class VisualPDFSplitterApp:
     
     def toggle_edit_mode(self):
         """Toggle page edit mode (reorder + delete + rotate)"""
-        self.edit_mode = self.edit_mode_var.get()
+        desired_mode = self.edit_mode_var.get()
+        
+        # If leaving edit mode and there are changes, prompt user
+        if self.edit_mode and not desired_mode:
+            if self.has_edited or self.deleted_pages or self.page_rotations:
+                choice = self.prompt_edit_exit()
+                if choice == "cancel":
+                    # User cancelled, revert checkbox
+                    self.edit_mode_var.set(True)
+                    return
+                elif choice == "discard":
+                    self.discard_edit_changes()
+                elif choice == "update":
+                    self.apply_edit_changes_to_pdf()
+        
+        self.edit_mode = desired_mode
         
         if self.edit_mode:
             # Disable crop mode when entering edit mode
@@ -650,6 +668,201 @@ class VisualPDFSplitterApp:
         if self.page_thumbnails:
             # Just refresh the display layout, don't rebuild thumbnails
             self.display_thumbnails(force_rebuild=True)
+    
+    def prompt_edit_exit(self):
+        """Prompt user when exiting edit mode with unsaved changes"""
+        # Create a custom dialog with three buttons
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Exit Edit Mode")
+        dialog.geometry("400x200")
+        dialog.transient(self.root)
+        dialog.grab_set()
+        
+        # Center the dialog
+        dialog.geometry("+%d+%d" % (self.root.winfo_rootx() + 50, self.root.winfo_rooty() + 50))
+        
+        result = {"choice": "cancel"}
+        
+        # Main message
+        message_frame = ttk.Frame(dialog)
+        message_frame.pack(pady=20, padx=20, fill=tk.BOTH, expand=True)
+        
+        ttk.Label(message_frame, text="You have unsaved changes in edit mode.", 
+                 font=(self.FONT_FAMILY, 12, 'bold')).pack(pady=(0, 10))
+        
+        ttk.Label(message_frame, text="What would you like to do?", 
+                 font=(self.FONT_FAMILY, 10)).pack(pady=(0, 20))
+        
+        # Buttons frame
+        buttons_frame = ttk.Frame(message_frame)
+        buttons_frame.pack(pady=10)
+        
+        def on_discard():
+            result["choice"] = "discard"
+            dialog.destroy()
+            
+        def on_update():
+            result["choice"] = "update"
+            dialog.destroy()
+            
+        def on_cancel():
+            result["choice"] = "cancel"
+            dialog.destroy()
+        
+        ttk.Button(buttons_frame, text="🗑️ Discard Changes", 
+                  command=on_discard).pack(side=tk.LEFT, padx=5)
+        ttk.Button(buttons_frame, text="💾 Update PDF", 
+                  command=on_update).pack(side=tk.LEFT, padx=5)
+        ttk.Button(buttons_frame, text="❌ Cancel", 
+                  command=on_cancel).pack(side=tk.LEFT, padx=5)
+        
+        # Bind Escape to cancel
+        dialog.bind('<Escape>', lambda e: on_cancel())
+        
+        # Wait for dialog to close
+        dialog.wait_window()
+        
+        return result["choice"]
+    
+    def discard_edit_changes(self):
+        """Discard all edit changes and restore original state"""
+        try:
+            # Restore original order
+            self.page_order = self.original_order.copy()
+            self.has_edited = False
+            
+            # Clear deleted pages
+            self.deleted_pages.clear()
+            
+            # Restore original rotations
+            self.page_rotations = self.original_rotations.copy()
+            
+            # Regenerate thumbnails with original rotations if needed
+            if self.original_rotations != self.page_rotations:
+                threading.Thread(target=self.generate_thumbnails, daemon=True).start()
+            else:
+                # Just refresh display
+                self.display_thumbnails(force_rebuild=True)
+            
+            self.update_edit_status()
+            self.update_file_label()
+            self.status_var.set("Edit changes discarded - PDF restored to original state")
+            
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to discard changes: {str(e)}")
+    
+    def apply_edit_changes_to_pdf(self):
+        """Apply edit changes permanently to the loaded PDF document"""
+        try:
+            if not self.has_edited and not self.deleted_pages and not self.page_rotations:
+                self.status_var.set("No changes to apply")
+                return
+            
+            self.status_var.set("Applying changes to PDF...")
+            self.root.update()
+            
+            # Create a new PDF document with the changes applied
+            import tempfile
+            temp_path = tempfile.mktemp(suffix=".pdf")
+            
+            # Create new document using PyPDF2 to apply changes
+            from PyPDF2 import PdfWriter, PdfReader
+            
+            # First, save the current PDF document (which might be already modified) to a temp file
+            current_temp_path = tempfile.mktemp(suffix="_current.pdf")
+            self.pdf_document.save(current_temp_path)
+            
+            # Read from the current PDF (original or previously modified)
+            with open(current_temp_path, 'rb') as file:
+                pdf_reader = PdfReader(file)
+                pdf_writer = PdfWriter()
+                
+                # Add pages in the new order, skipping deleted pages, with rotations
+                for page_index in self.page_order:
+                    if page_index in self.deleted_pages:
+                        continue
+                    
+                    page = pdf_reader.pages[page_index]
+                    
+                    # Apply rotation if set for this page (1-based page number)
+                    page_number = page_index + 1
+                    if page_number in self.page_rotations:
+                        rotation_angle = self.page_rotations[page_number]
+                        page.rotate(rotation_angle)
+                    
+                    pdf_writer.add_page(page)
+                
+                # Write to final temporary file
+                with open(temp_path, 'wb') as output_file:
+                    pdf_writer.write(output_file)
+            
+            # Clean up the temporary current file
+            try:
+                os.remove(current_temp_path)
+            except:
+                pass
+            
+            # Track modification for this specific PDF
+            current_pdf_path = self.pdf_path
+            self.pdf_modifications[current_pdf_path] = {
+                'temp_path': temp_path,
+                'original_path': current_pdf_path
+            }
+            
+            # Close the current PDF document
+            if self.pdf_document:
+                self.pdf_document.close()
+            
+            # Load the modified PDF document
+            self.pdf_document = fitz.open(temp_path)
+            
+            # Update the cache with the new document, keeping the original path as key
+            # This ensures folder navigation continues to work properly
+            self.pdf_documents[current_pdf_path] = self.pdf_document
+            
+            # Reset edit state since changes are now applied
+            self.initialize_edit_session()
+            
+            # Regenerate thumbnails for the modified PDF
+            threading.Thread(target=self.generate_thumbnails, daemon=True).start()
+            
+            # Update file label to show modified state
+            self.update_file_label()
+            self.status_var.set("Changes applied successfully - PDF updated for this session")
+            
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to apply changes to PDF: {str(e)}")
+            self.status_var.set("Error applying changes")
+    
+    def update_file_label(self):
+        """Update file label to show current state and modifications"""
+        if not self.pdf_document:
+            return
+            
+        filename = os.path.basename(self.pdf_path) if self.pdf_path else "Unknown"
+        page_count = len(self.pdf_document)
+        
+        # Show different states based on PDF origin
+        if self.pdf_path in self.pdf_modifications:
+            # PDF has been modified during this session
+            text = f"{filename} (Modified - {page_count} pages)"
+            color = 'darkblue'
+        elif self.is_merged_pdf:
+            # Merged PDF
+            text = f"Merged PDF - {page_count} pages"
+            color = 'darkgreen'
+        else:
+            # Original unmodified PDF
+            text = f"{filename} ({page_count} pages)"
+            color = 'black'
+            
+        self.file_label.config(text=text, foreground=color)
+    
+    def get_actual_pdf_path(self, original_path):
+        """Get the actual PDF path to use (modified temp file if exists, otherwise original)"""
+        if original_path in self.pdf_modifications:
+            return self.pdf_modifications[original_path]['temp_path']
+        return original_path
     
     def show_edit_instructions(self):
         """Show brief instructions for edit mode"""
@@ -1297,9 +1510,7 @@ class VisualPDFSplitterApp:
             self.initialize_edit_session()
             
             # Update UI
-            filename = os.path.basename(current_pdf_path)
-            self.file_label.config(text=f"{filename} ({len(self.pdf_document)} pages)", 
-                                  foreground='black')
+            self.update_file_label()
             
             # Update navigation label
             self.update_pdf_navigation_label()
@@ -1450,6 +1661,9 @@ class VisualPDFSplitterApp:
             self.pdf_path = file_path
             filename = os.path.basename(file_path)
             
+            # Reset edit session state when loading new PDF (but keep per-PDF modifications)
+            # The pdf_modifications dict will persist to track changes across different PDFs
+            
             # Reset rotations when loading new PDF
             self.page_rotations = {}
             
@@ -1462,8 +1676,7 @@ class VisualPDFSplitterApp:
             self.initialize_edit_session()
             
             # Update UI
-            self.file_label.config(text=f"{filename} ({len(self.pdf_document)} pages)", 
-                                  foreground='black')
+            self.update_file_label()
             self.status_var.set(f"PDF loaded - {len(self.pdf_document)} pages")
             
             # Update navigation (hide for single PDF)
@@ -3449,9 +3662,14 @@ For issues or questions, please refer to the documentation or contact support.""
         try:
             self.status_var.set("Merging PDFs...")
             
-            # Store the first PDF name for default naming
+            # Get actual PDF paths (use modified versions if they exist)
+            actual_first_path = self.get_actual_pdf_path(first_pdf_path)
+            actual_second_path = self.get_actual_pdf_path(second_pdf_path)
+            
+            # Store the first PDF name for default naming (use original path for naming)
             self.merged_first_pdf_name = Path(first_pdf_path).stem
             print(f"DEBUG: Stored merged PDF name: '{self.merged_first_pdf_name}' from path: '{first_pdf_path}'")
+            print(f"DEBUG: Using actual paths - First: '{actual_first_path}', Second: '{actual_second_path}'")
             
             # Create temporary file for merged PDF
             import tempfile
@@ -3459,9 +3677,9 @@ For issues or questions, please refer to the documentation or contact support.""
             temp_filename = f"merged_pdf_{int(time.time())}.pdf"
             self.merged_temp_path = os.path.join(temp_dir, temp_filename)
             
-            # Open both PDFs
-            first_doc = fitz.open(first_pdf_path)
-            second_doc = fitz.open(second_pdf_path)
+            # Open both PDFs using actual paths (modified or original)
+            first_doc = fitz.open(actual_first_path)
+            second_doc = fitz.open(actual_second_path)
             
             # Create new merged document
             merged_doc = fitz.open()  # Create empty document
@@ -3511,7 +3729,7 @@ For issues or questions, please refer to the documentation or contact support.""
                 return
                 
             # Update UI
-            self.file_label.config(text=f"Merged PDF - {len(self.pdf_document)} pages", foreground='darkgreen')
+            self.update_file_label()
             
             # Initialize for editing
             self.initialize_edit_session()
