@@ -381,6 +381,50 @@ class VisualPDFSplitterApp:
         ttk.Button(edit_buttons, text="🔄 Reset", command=self.reset_edit_session).pack(side=tk.LEFT, padx=(0, 2))
         ttk.Button(edit_buttons, text="💾 Save PDF", command=self.save_edited_pdf, style='Edit.TButton').pack(side=tk.LEFT)
         
+        # Bulk delete section - only visible in edit mode
+        self.bulk_delete_frame = ttk.Frame(edit_section)
+        
+        bulk_delete_label = ttk.Label(self.bulk_delete_frame, text="Delete Current Positions:")
+        bulk_delete_label.pack(anchor=tk.W)
+        
+        # Input frame for entry and button
+        bulk_input_frame = ttk.Frame(self.bulk_delete_frame)
+        bulk_input_frame.pack(fill=tk.X, pady=(2, 0))
+        
+        self.bulk_delete_entry = ttk.Entry(bulk_input_frame, width=20,
+                                         font=(self.FONT_FAMILY, 9))
+        self.bulk_delete_entry.pack(side=tk.LEFT, padx=(0, 5))
+        
+        # Configure entry field to be properly focusable
+        self.bulk_delete_entry.configure(state='normal')
+        
+        # Bind Enter key to trigger bulk delete
+        self.bulk_delete_entry.bind('<Return>', lambda e: self.bulk_delete_pages())
+        
+        # Ensure entry field can receive focus when clicked
+        def focus_entry(event):
+            self.bulk_delete_entry.focus_set()
+            self.bulk_delete_entry.icursor(tk.END)
+            return 'break'  # Prevent event propagation
+            
+        self.bulk_delete_entry.bind('<Button-1>', focus_entry)
+        
+        # Also bind to the label click to focus the entry
+        bulk_delete_label.bind('<Button-1>', lambda e: self.bulk_delete_entry.focus_set())
+        
+        ttk.Button(bulk_input_frame, text="❌ Delete", 
+                  command=self.bulk_delete_pages).pack(side=tk.LEFT)
+        
+        # Help text
+        help_text = ttk.Label(self.bulk_delete_frame, 
+                             text="Enter current positions: 1,3,5 or 2-4,7-9 or 1,3-5,8",
+                             font=(self.FONT_FAMILY, 8),
+                             foreground='gray')
+        help_text.pack(anchor=tk.W)
+        
+        # Initially hide bulk delete frame
+        self.bulk_delete_frame.pack_forget()
+        
         # === PRIMARY ACTION (flexible positioning) ===
         primary_section = ttk.Frame(second_row)
         primary_section.pack(side=tk.LEFT, pady=5)
@@ -545,11 +589,22 @@ class VisualPDFSplitterApp:
         self.canvas.bind('<Home>', lambda e: self.canvas.yview_moveto(0))
         self.canvas.bind('<End>', lambda e: self.canvas.yview_moveto(1))
         
-        # Ensure canvas clicks don't steal focus from arrow key handling
-        self.canvas.bind('<Button-1>', lambda e: self.root.focus_set())
+        # Ensure canvas clicks don't steal focus from entry fields
+        self.canvas.bind('<Button-1>', self.handle_canvas_click)
         
         # Make canvas focusable for keyboard events
         self.canvas.focus_set()
+
+    def handle_canvas_click(self, event):
+        """Handle canvas clicks without stealing focus from entry fields"""
+        # Check if focus is currently on an entry widget
+        focused_widget = self.root.focus_get()
+        if focused_widget and isinstance(focused_widget, (ttk.Entry, tk.Entry)):
+            # Don't steal focus if an entry field is currently focused
+            return
+        
+        # Otherwise, set focus to root for keyboard navigation
+        self.root.focus_set()
 
     # ===== PAGE EDITING FUNCTIONALITY (REORDER + DELETE + ROTATE) =====
     
@@ -577,11 +632,19 @@ class VisualPDFSplitterApp:
             # Change background color to indicate edit mode
             self.thumbnails_frame.config(bg=self.colors['edit_mode'])
             
+            # Show bulk delete frame
+            if hasattr(self, 'bulk_delete_frame'):
+                self.bulk_delete_frame.pack(pady=(10, 0))
+            
             # Show edit instructions
             self.show_edit_instructions()
         else:
             self.status_var.set("Page selection mode enabled")
             self.thumbnails_frame.config(bg='white')
+            
+            # Hide bulk delete frame
+            if hasattr(self, 'bulk_delete_frame'):
+                self.bulk_delete_frame.pack_forget()
             
         # Update display to reflect mode change without rebuilding thumbnails
         if self.page_thumbnails:
@@ -635,6 +698,121 @@ class VisualPDFSplitterApp:
             # Update status
             remaining_pages = len(self.page_order)
             self.status_var.set(f"Deleted page {page_number}. {remaining_pages} pages remaining.")
+    
+    def parse_page_ranges(self, range_string):
+        """Parse page range string into list of page numbers"""
+        if not range_string.strip():
+            return []
+            
+        pages = set()
+        try:
+            # Split by commas and process each part
+            parts = [part.strip() for part in range_string.split(',')]
+            
+            for part in parts:
+                if '-' in part:
+                    # Handle ranges like "2-5"
+                    start, end = part.split('-', 1)
+                    start = int(start.strip())
+                    end = int(end.strip())
+                    
+                    if start > end:
+                        start, end = end, start  # Swap if reversed
+                        
+                    pages.update(range(start, end + 1))
+                else:
+                    # Handle single pages
+                    page_num = int(part.strip())
+                    pages.add(page_num)
+                    
+            return sorted(list(pages))
+            
+        except ValueError as e:
+            raise ValueError("Invalid format. Use numbers and ranges like: 1,3,5-7,10")
+    
+    def bulk_delete_pages(self):
+        """Delete multiple pages based on user input (using current display positions)"""
+        if not self.edit_mode:
+            return
+            
+        if not self.pdf_document:
+            messagebox.showwarning("Warning", "Please load a PDF file first.")
+            return
+            
+        range_text = self.bulk_delete_entry.get().strip()
+        if not range_text:
+            messagebox.showwarning("Warning", "Please enter page positions to delete.")
+            return
+        
+        try:
+            # Parse the input as display positions
+            positions_to_delete = self.parse_page_ranges(range_text)
+            
+            if not positions_to_delete:
+                messagebox.showwarning("Warning", "No valid positions specified.")
+                return
+            
+            # Get current visible pages (excluding already deleted ones)
+            current_visible_pages = [idx for idx in self.page_order if idx not in self.deleted_pages]
+            current_page_count = len(current_visible_pages)
+            
+            # Validate positions against current visible page count
+            invalid_positions = [p for p in positions_to_delete if p < 1 or p > current_page_count]
+            if invalid_positions:
+                messagebox.showerror("Error", f"Invalid positions: {', '.join(map(str, invalid_positions))}\nValid range: 1-{current_page_count} (current visible pages)")
+                return
+            
+            # Convert display positions to actual page indices
+            actual_page_indices_to_delete = []
+            original_page_numbers = []  # For display in confirmation
+            
+            for position in positions_to_delete:
+                # Convert 1-based position to 0-based index in current visible pages
+                visible_index = position - 1
+                if visible_index < len(current_visible_pages):
+                    actual_page_index = current_visible_pages[visible_index]
+                    actual_page_indices_to_delete.append(actual_page_index)
+                    original_page_numbers.append(actual_page_index + 1)  # For display (original page number)
+            
+            if not actual_page_indices_to_delete:
+                messagebox.showwarning("Warning", "No valid pages to delete.")
+                return
+            
+            # Show confirmation with both current positions and original page numbers
+            positions_str = ', '.join(map(str, positions_to_delete))
+            original_pages_str = ', '.join(map(str, original_page_numbers))
+            
+            if len(positions_to_delete) == 1:
+                message = f"Delete current position {positions_str} (original page {original_pages_str})?"
+            else:
+                message = f"Delete {len(positions_to_delete)} pages at positions {positions_str}?\n(Original pages: {original_pages_str})\n\nThis can be undone with 'Reset'."
+            
+            if messagebox.askyesno("Bulk Delete Pages", message):
+                # Add pages to deleted set
+                self.deleted_pages.update(actual_page_indices_to_delete)
+                
+                # Remove from current page order
+                self.page_order = [p for p in self.page_order if p not in actual_page_indices_to_delete]
+                
+                # Mark as edited
+                self.has_edited = True
+                
+                # Clear the input field
+                self.bulk_delete_entry.delete(0, tk.END)
+                
+                # Update display
+                self.regenerate_ordered_thumbnails()
+                self.update_edit_status()
+                
+                # Update status
+                remaining_pages = len(self.page_order)
+                deleted_count = len(positions_to_delete)
+                self.status_var.set(f"Deleted {deleted_count} page{'s' if deleted_count > 1 else ''}. {remaining_pages} pages remaining.")
+                
+        except ValueError as e:
+            messagebox.showerror("Error", str(e))
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to delete pages: {str(e)}")
     
     def start_drag(self, event, page_index):
         """Start dragging a page"""
@@ -855,46 +1033,22 @@ class VisualPDFSplitterApp:
             messagebox.showerror("Reorder Error", f"Failed to reorder pages: {str(e)}")
     
     def regenerate_ordered_thumbnails(self):
-        """Regenerate thumbnails in the new order without complete rebuild"""
+        """Refresh the thumbnail display after reorder/delete operations"""
         if not self.pdf_document or not self.page_order:
             return
             
         try:
-            # Store original thumbnails to avoid losing them during reordering
-            original_thumbnails = self.page_thumbnails.copy()
-            original_widgets = self.page_widgets.copy()
+            # Just refresh the display - thumbnails stay indexed by original page numbers
+            # The display logic in display_thumbnails() now handles the correct ordering
+            self.display_thumbnails(force_rebuild=True)
             
-            # Create new ordered lists
-            ordered_thumbnails = []
-            ordered_widgets = []
-            
-            # Reorder based on page_order, preserving existing thumbnail objects
-            for page_index in self.page_order:
-                if page_index < len(original_thumbnails):
-                    ordered_thumbnails.append(original_thumbnails[page_index])
-                else:
-                    ordered_thumbnails.append(None)
-                    
-                if page_index < len(original_widgets):
-                    ordered_widgets.append(original_widgets[page_index])
-                else:
-                    ordered_widgets.append(None)
-            
-            # Update the lists atomically to prevent race conditions
-            self.page_thumbnails = ordered_thumbnails
-            self.page_widgets = ordered_widgets
-            
-            # Only redisplay if we have valid thumbnails to avoid flicker
-            if any(thumb is not None for thumb in self.page_thumbnails):
-                self.display_thumbnails()
+            # Update edit status
+            self.update_edit_status()
             
         except Exception as e:
             pass
-            # Fallback: restore original state if reordering fails
-            if 'original_thumbnails' in locals():
-                self.page_thumbnails = original_thumbnails
-            if 'original_widgets' in locals():
-                self.page_widgets = original_widgets
+            # Simple fallback: just try to display what we have
+            self.display_thumbnails(force_rebuild=True)
     
     def reset_edit_session(self):
         """Reset pages to original order, restore deleted pages, and reset rotations"""
@@ -962,7 +1116,12 @@ class VisualPDFSplitterApp:
             return
             
         # Get filename choice from user
-        default_name = Path(self.pdf_path).stem + "_edited.pdf" if self.pdf_path else "edited.pdf"
+        if self.is_merged_pdf and self.merged_first_pdf_name:
+            # For merged PDFs, use first PDF name + merged
+            default_name = f"{self.merged_first_pdf_name}_merged.pdf"
+        else:
+            # For regular PDFs, use original naming
+            default_name = Path(self.pdf_path).stem + "_edited.pdf" if self.pdf_path else "edited.pdf"
         
         chosen_filename = self.get_custom_filename(default_name, "PDF")
         if not chosen_filename:
@@ -1389,8 +1548,7 @@ class VisualPDFSplitterApp:
             
     def display_thumbnails(self, force_rebuild=False):
         """Display thumbnail images in the canvas"""
-        # Only clear existing thumbnails if force_rebuild is True or if we need to rebuild
-        # This prevents flickering during reordering operations
+        # Clear existing thumbnails if force_rebuild or first time
         if force_rebuild or not hasattr(self, '_thumbnails_displayed'):
             for widget in self.thumbnails_frame.winfo_children():
                 widget.destroy()
@@ -1399,7 +1557,6 @@ class VisualPDFSplitterApp:
         
         if not self.page_thumbnails:
             return
-            
             
         # Calculate grid layout based on view mode
         canvas_width = self.canvas.winfo_width()
@@ -1418,25 +1575,27 @@ class VisualPDFSplitterApp:
             thumb_width = self.thumbnail_size + 60  # Add more padding for rotation buttons
             cols = max(1, (canvas_width - margin) // (thumb_width + margin))
         
-        # Create thumbnail grid using current page order (excluding deleted pages)
+        # Create thumbnail grid - display pages in current order, excluding deleted pages
         displayed_count = 0
-        for display_index in range(len(self.page_order)):
-            page_index = self.page_order[display_index]  # Get actual page index from order
-            
+        
+        for display_position, original_page_index in enumerate(self.page_order):
             # Skip deleted pages
-            if page_index in self.deleted_pages:
+            if original_page_index in self.deleted_pages:
                 continue
             
-            if page_index >= len(self.page_thumbnails):
+            # Validate page index
+            if original_page_index >= len(self.page_thumbnails):
                 continue
                 
-            photo = self.page_thumbnails[page_index]  # Get photo at actual index
+            # Get the thumbnail for this original page
+            photo = self.page_thumbnails[original_page_index]
             
             # Skip if thumbnail failed to generate
             if photo is None:
                 continue
                 
-            page_number = page_index + 1  # Display page number (1-based)
+            # Original page number (1-based for display)
+            original_page_number = original_page_index + 1
             
             row = displayed_count // cols
             col = displayed_count % cols
@@ -1458,14 +1617,15 @@ class VisualPDFSplitterApp:
                            sticky=sticky_opts)
             
             # Page number and rotation info
-            rotation_angle = self.page_rotations.get(page_number, 0)
+            rotation_angle = self.page_rotations.get(original_page_number, 0)
             rotation_text = f" (↻{rotation_angle}°)" if rotation_angle != 0 else ""
             
-            # Show position if in edit mode
+            # Show current position in edit mode
             if self.edit_mode:
-                page_text = f"#{display_index + 1}: Page {page_number}{rotation_text}"
+                current_position = displayed_count  # 1-based position in current order
+                page_text = f"#{current_position}: Page {original_page_number}{rotation_text}"
             else:
-                page_text = f"Page {page_number}{rotation_text}"
+                page_text = f"Page {original_page_number}{rotation_text}"
             
             page_label = tk.Label(thumb_frame, text=page_text, 
                                 font=(self.FONT_FAMILY, 11 if self.view_mode == 'single' else 9, 'bold'), 
@@ -1487,7 +1647,7 @@ class VisualPDFSplitterApp:
                                           font=(self.FONT_FAMILY, 10 if self.view_mode == 'single' else 8, 'bold'),
                                           width=3 if self.view_mode == 'single' else 2,
                                           height=1,
-                                          command=lambda p=page_number: self.rotate_page(p, -90),
+                                          command=lambda p=original_page_number: self.rotate_page(p, -90),
                                           bg='lightblue', relief=tk.RAISED, cursor='hand2')
                 rotate_left_btn.pack(side=tk.LEFT, padx=(0, 2))
                 
@@ -1496,16 +1656,16 @@ class VisualPDFSplitterApp:
                                            font=(self.FONT_FAMILY, 10 if self.view_mode == 'single' else 8, 'bold'),
                                            width=3 if self.view_mode == 'single' else 2,
                                            height=1,
-                                           command=lambda p=page_number: self.rotate_page(p, 90),
+                                           command=lambda p=original_page_number: self.rotate_page(p, 90),
                                            bg='lightgreen', relief=tk.RAISED, cursor='hand2')
                 rotate_right_btn.pack(side=tk.LEFT, padx=(2, 0))
                 
-                # Delete button
+                # Delete button - use display position to delete from current order
                 delete_btn = tk.Button(edit_controls_frame, text="❌", 
                                      font=(self.FONT_FAMILY, 10 if self.view_mode == 'single' else 8, 'bold'),
                                      width=3 if self.view_mode == 'single' else 2,
                                      height=1,
-                                     command=lambda idx=display_index: self.delete_page(idx),
+                                     command=lambda pos=display_position: self.delete_page(pos),
                                      bg='lightcoral', relief=tk.RAISED, cursor='hand2')
                 delete_btn.pack(side=tk.RIGHT)
             else:
@@ -1525,7 +1685,7 @@ class VisualPDFSplitterApp:
                                   bg=bg_color, fg='black')
             status_label.pack(pady=(0, 8 if self.view_mode == 'single' else 5))
             
-            # Store widget references with display index (not page index!)
+            # Store widget references
             page_widget = {
                 'frame': thumb_frame,
                 'page_label': page_label,
@@ -1535,35 +1695,32 @@ class VisualPDFSplitterApp:
                 'rotate_left_btn': rotate_left_btn,
                 'rotate_right_btn': rotate_right_btn,
                 'delete_btn': delete_btn if self.edit_mode else None,
-                'page_num': page_number,  # This is the actual page number (1-based)
-                'page_index': page_index  # This is the original page index (0-based)
+                'page_num': original_page_number,  # 1-based page number for display
+                'page_index': original_page_index,  # 0-based original page index
+                'display_position': display_position  # Position in current page_order
             }
             
-            # Ensure page_widgets list is long enough for display index
-            while len(self.page_widgets) <= display_index:
-                self.page_widgets.append(None)
+            # Add widget to the list (widgets are now stored in display order)
+            self.page_widgets.append(page_widget)
             
-            # Store widget at display index
-            self.page_widgets[display_index] = page_widget
-            
-            # Setup drag and drop if in edit mode
+            # Setup drag and drop if in edit mode (use display_position for the drag logic)
             if self.edit_mode:
-                self.setup_drag_and_drop(page_widget, display_index)
+                self.setup_drag_and_drop(page_widget, display_position)
             
             # Bind click events to main elements (not edit control buttons)
             clickable_widgets = [thumb_frame, page_label, thumb_label, status_label]
             if not self.edit_mode:  # Only bind regular clicks if not in edit mode
                 for widget in clickable_widgets:
-                    widget.bind(self.EVENT_BUTTON_1, lambda e, page=page_number: self.handle_click(e, page))
-                    widget.bind('<B1-Motion>', lambda e, page=page_number: self.handle_drag(e, page))
-                    widget.bind('<ButtonRelease-1>', lambda e, page=page_number: self.handle_release(e, page))
-                    widget.bind('<Enter>', lambda e, page=page_number: self.on_page_hover(page, True))
-                    widget.bind('<Leave>', lambda e, page=page_number: self.on_page_hover(page, False))
+                    widget.bind(self.EVENT_BUTTON_1, lambda e, page=original_page_number: self.handle_click(e, page))
+                    widget.bind('<B1-Motion>', lambda e, page=original_page_number: self.handle_drag(e, page))
+                    widget.bind('<ButtonRelease-1>', lambda e, page=original_page_number: self.handle_release(e, page))
+                    widget.bind('<Enter>', lambda e, page=original_page_number: self.on_page_hover(page, True))
+                    widget.bind('<Leave>', lambda e, page=original_page_number: self.on_page_hover(page, False))
             else:
                 # In edit mode, only bind hover effects to non-drag widgets
                 for widget in clickable_widgets:
-                    widget.bind('<Enter>', lambda e, page=page_number: self.on_page_hover(page, True))
-                    widget.bind('<Leave>', lambda e, page=page_number: self.on_page_hover(page, False))
+                    widget.bind('<Enter>', lambda e, page=original_page_number: self.on_page_hover(page, True))
+                    widget.bind('<Leave>', lambda e, page=original_page_number: self.on_page_hover(page, False))
                     
             # Always bind mouse wheel scrolling
             for widget in clickable_widgets:
@@ -1822,8 +1979,11 @@ class VisualPDFSplitterApp:
         else:
             self.status_var.set(f"Page {page_number} rotated to {new_rotation}°")
         
-        # Regenerate only the affected thumbnail (for better performance)
+        # Regenerate the affected thumbnail and refresh display
         self.regenerate_single_thumbnail(page_number)
+        
+        # Refresh the display to show updated rotation
+        self.display_thumbnails(force_rebuild=True)
         
     def regenerate_single_thumbnail(self, page_number):
         """Regenerate thumbnail for a single page"""
@@ -1844,7 +2004,7 @@ class VisualPDFSplitterApp:
             # Apply rotation if set for this page
             if page_number in self.page_rotations:
                 rotation_angle = self.page_rotations[page_number]
-                mat = mat * fitz.Matrix(rotation_angle)
+                mat = mat.prerotate(rotation_angle)  # Use prerotate instead of matrix multiplication
             
             # Render page
             pix = page.get_pixmap(matrix=mat)
@@ -1854,37 +2014,15 @@ class VisualPDFSplitterApp:
             img = Image.open(io.BytesIO(img_data))
             photo = ImageTk.PhotoImage(img)
             
-            # Update the thumbnail in the list
+            # Update the thumbnail in the list at the original page index
             self.page_thumbnails[page_index] = photo
             
-            # Find and update the specific widget
-            for widget in self.page_widgets:
-                if widget is not None and widget['page_num'] == page_number:
-                    # Update thumbnail image
-                    widget['thumb_label'].config(image=photo)
-                    
-                    # Update page label with rotation info
-                    rotation_angle = self.page_rotations.get(page_number, 0)
-                    rotation_text = f" (↻{rotation_angle}°)" if rotation_angle != 0 else ""
-                    
-                    # Find display position for this page
-                    display_index = None
-                    try:
-                        display_index = self.page_order.index(page_index)
-                    except ValueError:
-                        pass
-                    
-                    if self.edit_mode and display_index is not None:
-                        page_text = f"#{display_index + 1}: Page {page_number}{rotation_text}"
-                    else:
-                        page_text = f"Page {page_number}{rotation_text}"
-                    
-                    widget['page_label'].config(text=page_text)
-                    break
+            # Note: Individual widget updating is handled by the display_thumbnails() call
+            # in rotate_page() function with force_rebuild=True
                 
         except Exception as e:
             pass
-            messagebox.showerror("Error", f"Failed to rotate page {page_number}:\n{str(e)}")
+            # Don't show error dialog for single thumbnail failures
             
     def clear_ranges_only(self):
         """Clear only the page ranges, leaving crops intact"""
@@ -2005,19 +2143,12 @@ class VisualPDFSplitterApp:
             return
             
         try:
-            total_pages = len(self.page_thumbnails)
+            total_pages = len(self.pdf_document)
             
-            # Preserve page order and deleted pages during zoom regeneration
-            preserved_order = self.page_order.copy() if hasattr(self, 'page_order') else list(range(total_pages))
-            preserved_deleted = self.deleted_pages.copy() if hasattr(self, 'deleted_pages') else set()
-            
-            # Generate new thumbnails at the new size
+            # Generate new thumbnails at the new size - keep original page indexing
             new_thumbnails = [None] * total_pages
             
             for page_num in range(total_pages):
-                if page_num in preserved_deleted:
-                    continue  # Skip deleted pages
-                    
                 try:
                     # Show progress
                     self.root.after(0, lambda p=page_num, t=total_pages: 
@@ -2029,8 +2160,8 @@ class VisualPDFSplitterApp:
                     # Calculate zoom factor to fit thumbnail size
                     zoom = self.thumbnail_size / max(page_rect.width, page_rect.height)
                     
-                    # Get rotation for this page
-                    rotation = self.page_rotations.get(page_num, 0)
+                    # Get rotation for this page (use 1-based page number for rotations)
+                    rotation = self.page_rotations.get(page_num + 1, 0)
                     
                     # Create image with proper rotation
                     mat = fitz.Matrix(zoom, zoom).prerotate(rotation)
@@ -2046,12 +2177,8 @@ class VisualPDFSplitterApp:
                     pass
                     new_thumbnails[page_num] = None
             
-            # Update thumbnails list atomically
+            # Update thumbnails list - maintain original page indexing
             self.page_thumbnails = new_thumbnails
-            
-            # Restore order and state
-            self.page_order = preserved_order
-            self.deleted_pages = preserved_deleted
             
             # Update display with the new thumbnails
             self.root.after(0, lambda: self.display_thumbnails(force_rebuild=True))
@@ -3365,11 +3492,15 @@ For issues or questions, please refer to the documentation or contact support.""
     def load_merged_pdf(self):
         """Load the merged PDF and enable edit mode"""
         try:
+            # Preserve the first PDF name before clearing state
+            preserved_first_pdf_name = self.merged_first_pdf_name
+            
             # Clear existing state
             self.clear_all_state()
             
             # Set merged PDF flags
             self.is_merged_pdf = True
+            self.merged_first_pdf_name = preserved_first_pdf_name  # Restore the preserved name
             self.pdf_path = self.merged_temp_path
             
             # Load the merged document
