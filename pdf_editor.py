@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Visual PDF Splitter Desktop Application with Drag & Drop Page Reordering
+Homemade PDF Editor Desktop Application with Drag & Drop Page Reordering
 A modern GUI tool for splitting PDF files with visual page thumbnails, reordering capability,
 folder support, multi-PDF navigation, and crop preview panel
 """
@@ -35,7 +35,7 @@ class VisualPDFSplitterApp:
     
     def __init__(self, root):
         self.root = root
-        self.root.title("Visual PDF Splitter - Page Preview, Selection & Edit Mode")
+        self.root.title("Homemade PDF Editor - Page Preview, Selection & Edit Mode")
         self.root.geometry("1600x900")  # Increased width for crop preview panel
         self.root.minsize(1200, 700)
         
@@ -108,7 +108,7 @@ class VisualPDFSplitterApp:
         # Setup GUI
         self.setup_styles()
         self.create_widgets()
-        self.create_menu()
+        self.setup_keyboard_shortcuts()
         
     def setup_styles(self):
         """Configure modern styling"""
@@ -123,55 +123,8 @@ class VisualPDFSplitterApp:
         style.configure(self.STYLE_ACCENT_BUTTON, font=(self.FONT_FAMILY, 10, 'bold'))
         style.configure('Edit.TButton', font=(self.FONT_FAMILY, 10, 'bold'), foreground='darkblue')
         
-    def create_menu(self):
-        """Create application menu"""
-        menubar = tk.Menu(self.root)
-        self.root.config(menu=menubar)
-        
-        # File menu
-        file_menu = tk.Menu(menubar, tearoff=0)
-        menubar.add_cascade(label="File", menu=file_menu)
-        file_menu.add_command(label="Open PDF...", command=self.load_pdf, accelerator="Ctrl+O")
-        file_menu.add_command(label="Open Folder...", command=self.load_pdf_folder, accelerator="Ctrl+Shift+O")
-        file_menu.add_separator()
-        file_menu.add_command(label="Merge Two PDFs...", command=self.merge_two_pdfs, accelerator="Ctrl+M")
-        file_menu.add_command(label="Merge with External PDF...", command=self.merge_add_external, accelerator="Ctrl+Shift+M")
-        file_menu.add_separator()
-        file_menu.add_command(label="Clear Selection", command=self.clear_selection, accelerator="Ctrl+C")
-        file_menu.add_command(label="Reset Edit Session", command=self.reset_edit_session, accelerator="Ctrl+R")
-        file_menu.add_separator()
-        file_menu.add_command(label="Exit", command=self.root.quit, accelerator="Ctrl+Q")
-        
-        # View menu
-        view_menu = tk.Menu(menubar, tearoff=0)
-        menubar.add_cascade(label="View", menu=view_menu)
-        view_menu.add_command(label="Zoom In", command=self.zoom_in, accelerator="Ctrl++")
-        view_menu.add_command(label="Zoom Out", command=self.zoom_out, accelerator="Ctrl+-")
-        view_menu.add_command(label="Reset Zoom", command=self.reset_zoom, accelerator="Ctrl+0")
-        view_menu.add_separator()
-        view_menu.add_command(label="Previous PDF", command=self.previous_pdf, accelerator="Up")
-        view_menu.add_command(label="Next PDF", command=self.next_pdf, accelerator="Down")
-        view_menu.add_separator()
-        view_menu.add_command(label="Toggle Crop Mode", command=self.toggle_crop_mode, accelerator="Ctrl+T")
-        view_menu.add_command(label="Toggle Edit Mode", command=self.toggle_edit_mode, accelerator="Ctrl+E")
-        view_menu.add_separator()
-        view_menu.add_command(label="Zoom with Mouse Wheel", state='disabled', accelerator="Ctrl+Wheel")
-        
-        # Tools menu
-        tools_menu = tk.Menu(menubar, tearoff=0)
-        menubar.add_cascade(label="Tools", menu=tools_menu)
-        tools_menu.add_command(label="Extract Crops as PDF", command=self.extract_crops_pdf, accelerator="Ctrl+P")
-        tools_menu.add_command(label="Extract Crops as PNG", command=self.extract_crops_png, accelerator="Ctrl+G")
-        tools_menu.add_command(label="Clear All Crops", command=self.clear_all_crops)
-        tools_menu.add_separator()
-        tools_menu.add_command(label="Save Edited PDF", command=self.save_edited_pdf, accelerator="Ctrl+S")
-        
-        # Help menu
-        help_menu = tk.Menu(menubar, tearoff=0)
-        menubar.add_cascade(label="Help", menu=help_menu)
-        help_menu.add_command(label="How to Use", command=self.show_help, accelerator="F1")
-        help_menu.add_command(label="About", command=self.show_about)
-        
+    def setup_keyboard_shortcuts(self):
+        """Setup keyboard shortcuts"""
         # Keyboard shortcuts
         self.root.bind('<Control-o>', lambda e: self.load_pdf())
         self.root.bind('<Control-Shift-O>', lambda e: self.load_pdf_folder())
@@ -263,7 +216,19 @@ class VisualPDFSplitterApp:
         title_frame = ttk.Frame(header_frame)
         title_frame.grid(row=0, column=0, sticky=tk.W)
         
-        title_label = ttk.Label(title_frame, text="📄 Visual PDF Splitter", style='Title.TLabel')
+        # Load and display logo
+        try:
+            logo_path = Path(__file__).parent / "logo.png"
+            logo_image = Image.open(logo_path)
+            logo_image = logo_image.resize((24, 24), Image.Resampling.LANCZOS)
+            self.logo_photo = ImageTk.PhotoImage(logo_image)
+            logo_label = ttk.Label(title_frame, image=self.logo_photo)
+            logo_label.pack(side=tk.LEFT, padx=(0, 8))
+        except Exception:
+            # Fallback to emoji if logo fails to load
+            pass
+        
+        title_label = ttk.Label(title_frame, text="Homemade PDF Editor", style='Title.TLabel')
         title_label.pack(side=tk.LEFT)
         
         subtitle_label = ttk.Label(title_frame, text="Click pages to select • Edit mode for reorder/delete/rotate • Ctrl+wheel to zoom • Visual crop feedback", 
@@ -290,11 +255,13 @@ class VisualPDFSplitterApp:
         file_section = ttk.Frame(main_controls_frame)
         file_section.pack(side=tk.LEFT, padx=(0, 20), pady=5)
         
-        ttk.Button(file_section, text="📁 Open PDF", 
-                  command=self.load_pdf, style=self.STYLE_ACCENT_BUTTON).pack(side=tk.LEFT, padx=(0, 5))
+        self.open_pdf_btn = ttk.Button(file_section, text="📁 Open PDF", 
+                                      command=self.load_pdf, style=self.STYLE_ACCENT_BUTTON)
+        self.open_pdf_btn.pack(side=tk.LEFT, padx=(0, 5))
         
-        ttk.Button(file_section, text="📂 Open Folder", 
-                  command=self.load_pdf_folder, style=self.STYLE_ACCENT_BUTTON).pack(side=tk.LEFT)
+        self.open_folder_btn = ttk.Button(file_section, text="📂 Open Folder", 
+                                         command=self.load_pdf_folder, style=self.STYLE_ACCENT_BUTTON)
+        self.open_folder_btn.pack(side=tk.LEFT)
         
         # === MERGE SECTION ===
         merge_section = ttk.Frame(main_controls_frame)
@@ -305,8 +272,11 @@ class VisualPDFSplitterApp:
         merge_buttons = ttk.Frame(merge_section)
         merge_buttons.pack()
         
-        ttk.Button(merge_buttons, text="🔗 Two PDFs", command=self.merge_two_pdfs).pack(side=tk.LEFT, padx=(0, 2))
-        ttk.Button(merge_buttons, text="➕ Add PDF", command=self.merge_add_external).pack(side=tk.LEFT, padx=(0, 2))
+        self.two_pdfs_btn = ttk.Button(merge_buttons, text="🔗 Two PDFs", command=self.merge_two_pdfs)
+        self.two_pdfs_btn.pack(side=tk.LEFT, padx=(0, 2))
+        
+        self.add_pdf_btn = ttk.Button(merge_buttons, text="➕ Add PDF", command=self.merge_add_external)
+        self.add_pdf_btn.pack(side=tk.LEFT, padx=(0, 2))
         
         # Save Merged PDF button (initially hidden)
         self.save_merged_btn = ttk.Button(merge_buttons, text="💾 Save Merged", command=self.save_merged_pdf, style='Accent.TButton')
@@ -322,8 +292,11 @@ class VisualPDFSplitterApp:
         nav_buttons = ttk.Frame(nav_section)
         nav_buttons.pack()
         
-        ttk.Button(nav_buttons, text="⬆️ Prev", command=self.previous_pdf).pack(side=tk.LEFT, padx=(0, 2))
-        ttk.Button(nav_buttons, text="⬇️ Next", command=self.next_pdf).pack(side=tk.LEFT)
+        self.prev_pdf_btn = ttk.Button(nav_buttons, text="⬆️ Prev", command=self.previous_pdf)
+        self.prev_pdf_btn.pack(side=tk.LEFT, padx=(0, 2))
+        
+        self.next_pdf_btn = ttk.Button(nav_buttons, text="⬇️ Next", command=self.next_pdf)
+        self.next_pdf_btn.pack(side=tk.LEFT)
         
         # === ZOOM SECTION ===
         zoom_section = ttk.Frame(main_controls_frame)
@@ -365,8 +338,11 @@ class VisualPDFSplitterApp:
         crop_buttons = ttk.Frame(crop_section)
         crop_buttons.pack()
         
-        ttk.Button(crop_buttons, text="📄 Extract PDF", command=self.extract_crops_pdf).pack(side=tk.LEFT, padx=(0, 2))
-        ttk.Button(crop_buttons, text="🖼️ Extract PNG", command=self.extract_crops_png).pack(side=tk.LEFT)
+        self.extract_pdf_btn = ttk.Button(crop_buttons, text="📄 Extract PDF", command=self.extract_crops_pdf)
+        self.extract_pdf_btn.pack(side=tk.LEFT, padx=(0, 2))
+        
+        self.extract_png_btn = ttk.Button(crop_buttons, text="🖼️ Extract PNG", command=self.extract_crops_png)
+        self.extract_png_btn.pack(side=tk.LEFT)
         
         # === NEW: EDIT SECTION ===
         edit_section = ttk.Frame(second_row)
@@ -381,8 +357,11 @@ class VisualPDFSplitterApp:
         edit_buttons = ttk.Frame(edit_section)
         edit_buttons.pack()
         
-        ttk.Button(edit_buttons, text="🔄 Reset", command=self.reset_edit_session).pack(side=tk.LEFT, padx=(0, 2))
-        ttk.Button(edit_buttons, text="💾 Save PDF", command=self.save_edited_pdf, style='Edit.TButton').pack(side=tk.LEFT)
+        self.reset_btn = ttk.Button(edit_buttons, text="🔄 Reset", command=self.reset_edit_session)
+        self.reset_btn.pack(side=tk.LEFT, padx=(0, 2))
+        
+        self.save_pdf_btn = ttk.Button(edit_buttons, text="💾 Save PDF", command=self.save_edited_pdf, style='Edit.TButton')
+        self.save_pdf_btn.pack(side=tk.LEFT)
         
         # Bulk delete section - only visible in edit mode
         self.bulk_delete_frame = ttk.Frame(edit_section)
@@ -434,8 +413,9 @@ class VisualPDFSplitterApp:
         
         ttk.Label(primary_section, text="Export:", style=self.STYLE_SUBTITLE).pack(anchor=tk.W)
         
-        ttk.Button(primary_section, text="📦 Split & Save ZIP", 
-                  command=self.split_and_save, style=self.STYLE_ACCENT_BUTTON).pack()
+        self.split_save_btn = ttk.Button(primary_section, text="📦 Split & Save ZIP", 
+                                        command=self.split_and_save, style=self.STYLE_ACCENT_BUTTON)
+        self.split_save_btn.pack()
         
         # === FILE INFO (spans across bottom) ===
         info_section = ttk.Frame(control_frame)
@@ -640,6 +620,9 @@ class VisualPDFSplitterApp:
         
         self.edit_mode = desired_mode
         
+        # Enable/disable buttons based on edit mode
+        self.update_buttons_for_edit_mode()
+        
         if self.edit_mode:
             # Disable crop mode when entering edit mode
             if self.crop_mode:
@@ -668,6 +651,40 @@ class VisualPDFSplitterApp:
         if self.page_thumbnails:
             # Just refresh the display layout, don't rebuild thumbnails
             self.display_thumbnails(force_rebuild=True)
+    
+    def update_buttons_for_edit_mode(self):
+        """Enable or disable buttons based on edit mode state"""
+        # List of buttons to disable in edit mode
+        buttons_to_disable = [
+            'open_pdf_btn', 'open_folder_btn', 'two_pdfs_btn', 
+            'add_pdf_btn', 'prev_pdf_btn', 'next_pdf_btn', 'split_save_btn',
+            'extract_pdf_btn', 'extract_png_btn', 'crop_toggle_btn'
+        ]
+        
+        for btn_name in buttons_to_disable:
+            if hasattr(self, btn_name):
+                button = getattr(self, btn_name)
+                if self.edit_mode:
+                    button.config(state='disabled')
+                else:
+                    button.config(state='normal')
+    
+    def update_buttons_for_crop_mode(self):
+        """Enable or disable buttons based on crop mode state"""
+        # List of buttons to disable in crop mode (same as edit mode, except keep crop buttons enabled)
+        buttons_to_disable = [
+            'open_pdf_btn', 'open_folder_btn', 'two_pdfs_btn', 
+            'add_pdf_btn', 'prev_pdf_btn', 'next_pdf_btn', 'split_save_btn',
+            'edit_toggle_btn', 'reset_btn', 'save_pdf_btn'  # Disable edit mode toggle and edit buttons when in crop mode
+        ]
+        
+        for btn_name in buttons_to_disable:
+            if hasattr(self, btn_name):
+                button = getattr(self, btn_name)
+                if self.crop_mode:
+                    button.config(state='disabled')
+                else:
+                    button.config(state='normal')
     
     def prompt_edit_exit(self):
         """Prompt user when exiting edit mode with unsaved changes"""
@@ -1656,9 +1673,9 @@ class VisualPDFSplitterApp:
             else:
                 return
         
-        # Calculate new zoom level
+        # Calculate new zoom level with 15% increments
         current_zoom = self.thumbnail_size
-        zoom_increment = 25  # Smaller increments for smoother zooming
+        zoom_increment = max(1, int(current_zoom * 0.15))  # 15% of current zoom, minimum 1 pixel
         
         if zoom_delta > 0:
             # Zoom in
@@ -2815,7 +2832,7 @@ class VisualPDFSplitterApp:
     
     def show_help(self):
         """Show help dialog"""
-        help_text = """Visual PDF Splitter with Edit Mode - How to Use
+        help_text = """Homemade PDF Editor - How to Use
 
 🚀 QUICK START:
 1. Click "Select PDF File" or "Select Folder" to load documents
@@ -2943,7 +2960,7 @@ class VisualPDFSplitterApp:
 • At least one page range, crop area, or edit operation must be performed"""
         
         help_window = tk.Toplevel(self.root)
-        help_window.title("Help - Visual PDF Splitter with Edit Mode")
+        help_window.title("Help - Homemade PDF Editor")
         help_window.geometry("700x600")
         help_window.resizable(True, True)
         
@@ -2976,7 +2993,7 @@ class VisualPDFSplitterApp:
         
     def show_about(self):
         """Show about dialog"""
-        about_text = """Visual PDF Splitter with Edit Mode v5.1
+        about_text = """Homemade PDF Editor v5.1
 
 A powerful desktop application for splitting PDF files with visual page selection, thumbnail previews, comprehensive edit mode (drag & drop reordering + page deletion + rotation), multi-PDF folder support, and crop extraction functionality with enhanced visual feedback, browser-like zoom controls, and streamlined interface.
 
@@ -3021,13 +3038,16 @@ Free for personal and commercial use
 📧 SUPPORT:
 For issues or questions, please refer to the documentation or contact support."""
         
-        messagebox.showinfo("About Visual PDF Splitter with Edit Mode", about_text)
+        messagebox.showinfo("About Homemade PDF Editor", about_text)
 
     # ===== CROP FUNCTIONALITY =====
     
     def toggle_crop_mode(self):
         """Toggle between page selection and crop mode"""
         self.crop_mode = self.crop_mode_var.get()
+        
+        # Enable/disable buttons based on crop mode
+        self.update_buttons_for_crop_mode()
         
         if self.crop_mode:
             # Disable edit mode when entering crop mode
