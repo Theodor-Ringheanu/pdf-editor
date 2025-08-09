@@ -672,10 +672,10 @@ class VisualPDFSplitterApp:
     
     def update_buttons_for_crop_mode(self):
         """Enable or disable buttons based on crop mode state"""
-        # List of buttons to disable in crop mode (same as edit mode, except keep crop buttons enabled)
+        # List of buttons to disable in crop mode (keep navigation buttons enabled for PDF switching)
         buttons_to_disable = [
             'open_pdf_btn', 'open_folder_btn', 'two_pdfs_btn', 
-            'add_pdf_btn', 'prev_pdf_btn', 'next_pdf_btn', 'split_save_btn',
+            'add_pdf_btn', 'split_save_btn',
             'edit_toggle_btn', 'reset_btn', 'save_pdf_btn'  # Disable edit mode toggle and edit buttons when in crop mode
         ]
         
