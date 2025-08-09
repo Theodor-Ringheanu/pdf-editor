@@ -38,6 +38,7 @@ class VisualPDFSplitterApp:
         self.root.title("Homemade PDF Editor - Page Preview, Selection & Edit Mode")
         self.root.geometry("1600x900")  # Increased width for crop preview panel
         self.root.minsize(1200, 700)
+        self.root.state('zoomed')  # Start in full screen mode
         
         # App state
         self.pdf_document = None
